@@ -1,1 +1,127 @@
-# chakradb
+# ChakraDB
+
+An embedded, single-process analytical database that accepts a continuous
+high-rate write stream while serving scans that never block — with on-disk state
+other engines can read directly.
+
+> **Status: M0 complete.** This repository currently contains a deliberately
+> throwaway risk-reduction prototype, not a database. It has no durability, no
+> SQL, and no persistence. See [`docs/m0-findings.md`](docs/m0-findings.md) for
+> what it proved and what it did not.
+
+---
+
+## The idea in one sentence
+
+DuckDB gives you fast scans over data you loaded earlier. ChakraDB aims at fast
+scans over data that is *still arriving*, with real transactions, in an open
+format.
+
+Individually, existing engines have three of the four properties below. None has
+all four:
+
+| | embedded | ACID + MVCC | concurrent writes + non-blocking scans | open on-disk format |
+|---|---|---|---|---|
+| DuckDB | ✅ | ✅ | ❌ single writer process | ⚠️ via DuckLake |
+| chDB | ⚠️ needs a subprocess | ❌ | ⚠️ | ✅ |
+| ArcticDB | ✅ | ❌ dropped by design | ✅ | ✅ |
+| Umbra / CedarDB | ❌ server | ✅ | ✅ | ❌ |
+| **ChakraDB (target)** | ✅ | ✅ | ✅ | ✅ |
+
+Supporting evidence that this gap is structural rather than merely unoptimised:
+ClickBench added a concurrent-query test, and **every embedded engine's result is
+`null`** — the benchmark structurally exempts them, because a single-process
+engine cannot meaningfully take the test.
+
+---
+
+## Repository layout
+
+```
+docs/
+  requirements.md        Architecture & design specification (v2.0)
+  roadmap.md             M0–M5 with decision gates and stop conditions
+  m0-findings.md         M0 results, including the negative ones
+  archive/               Superseded documents
+src/                     M0 prototype (zero dependencies)
+tests/                   Integration suites
+```
+
+Start with `docs/requirements.md` §1–§3 for the wedge and the cost model, then
+`docs/roadmap.md` for sequencing.
+
+---
+
+## Trying the prototype
+
+```bash
+cargo test                              # 224 tests, ~1s
+cargo run --release --bin m0-bench      # the M0 acceptance measurements
+```
+
+```rust
+use chakradb::{Database, Row};
+
+let db = Database::new();
+let users = db.create_table("users")?;
+
+users.insert(Row::new(1, 100, 1.5, "alice"))?;
+
+// Snapshots are stable across concurrent writes.
+let before = db.snapshot();
+users.update(Row::new(1, 999, 1.5, "alice-v2"))?;
+
+assert_eq!(users.get(1, before).unwrap().c, "alice");
+assert_eq!(users.get_latest(1).unwrap().c, "alice-v2");
+```
+
+Many tables share one snapshot clock, so a read across several of them observes a
+single instant. Each table has its own primary-key space. **Foreign keys are an
+explicit non-goal** — referential integrity is the application's business.
+
+---
+
+## What M0 established
+
+| Result | Number |
+|---|---|
+| Primary-key index cost | **1.25 B/row, flat with table size** (≈1.25 GB at 1B rows) |
+| Point-lookup latency, 1 → 33 parts | **flat at 1.1–1.7 µs** while fan-out grows 16× |
+| Scan under sustained write load | **3.77×** degradation without compaction, **1.38×** with it |
+| Cold-scan fast path | engages 30/30; disabled by a *single* tombstone |
+
+The index result is the important one. Because parts are written sorted by
+primary key, the ordinal position in the index *is* the row offset — so no
+key→location map exists to pay for. The comparable explicit map would cost ~12
+B/row, which is what forced StarRocks to build an LSM for its index.
+
+Two defects were found and are recorded as blockers for M1: compaction holds the
+table write lock for the whole merge (collapsing write throughput 18×), and the
+fan-out result assumed a key distribution friendly to min/max bounds.
+
+---
+
+## Design principles
+
+1. **Risk-first sequencing.** Every milestone ends at a gate with an explicit
+   stop condition. A gate you cannot fail is not a gate.
+2. **Buy execution, build storage.** The differentiator is the storage engine and
+   concurrency control; the query engine is a bought component.
+3. **Some seams cannot be retrofitted.** `trait Io`, `trait Clock` and a seeded
+   RNG exist from M0 — before anything needs them — because adding them after
+   compaction threads and a buffer pool call ambient APIs is a rewrite.
+4. **Publish the harness, not just the number.** No neutral benchmark measures
+   the axis this project competes on, so every performance claim ships with the
+   code that produced it.
+
+## Reading the numbers
+
+Every performance figure in this repository is single-machine, single-run, and
+unaudited. `docs/requirements.md` opens with an explicit confidence tiering, and
+the rule it sets is worth repeating here: **a number without a source is a
+hypothesis, not a measurement.** The design reasoning does not depend on any of
+them.
+
+## License
+
+Apache-2.0.
