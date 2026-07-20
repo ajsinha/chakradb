@@ -35,6 +35,12 @@ pub struct Metrics {
     pub rows_reclaimed: AtomicU64,
     /// Times ingest was slowed because compaction fell behind.
     pub backpressure_events: AtomicU64,
+    /// Nanoseconds ingest spent stalled under backpressure.
+    pub backpressure_nanos: AtomicU64,
+    /// Merges thrown away because their source parts changed underneath them.
+    pub compactions_discarded: AtomicU64,
+    /// Tombstones carried forward from a concurrent writer into a merge.
+    pub tombstones_replayed: AtomicU64,
 }
 
 impl Metrics {
@@ -103,6 +109,9 @@ impl Metrics {
             parts_merged: Self::get(&self.parts_merged),
             rows_reclaimed: Self::get(&self.rows_reclaimed),
             backpressure_events: Self::get(&self.backpressure_events),
+            backpressure_nanos: Self::get(&self.backpressure_nanos),
+            compactions_discarded: Self::get(&self.compactions_discarded),
+            tombstones_replayed: Self::get(&self.tombstones_replayed),
         }
     }
 }
@@ -125,6 +134,9 @@ pub struct MetricsSnapshot {
     pub parts_merged: u64,
     pub rows_reclaimed: u64,
     pub backpressure_events: u64,
+    pub backpressure_nanos: u64,
+    pub compactions_discarded: u64,
+    pub tombstones_replayed: u64,
 }
 
 #[cfg(test)]

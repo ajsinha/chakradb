@@ -198,27 +198,90 @@ impl Table {
 
     /// Run compaction if the policy says it is due. Returns parts merged.
     pub fn maybe_compact(&self, horizon: Csn) -> usize {
-        let mut inner = self.inner.write().unwrap();
-        if !self.config.compaction.should_compact(&inner.parts) {
-            return 0;
-        }
-        let TableInner {
-            parts,
-            next_part_id,
-            ..
-        } = &mut *inner;
-        compaction::compact(parts, next_part_id, horizon, &self.metrics)
+        let candidates = {
+            let inner = self.inner.read().unwrap();
+            if !self.config.compaction.should_compact(&inner.parts) {
+                return 0;
+            }
+            self.config.compaction.select(&inner.parts).to_vec()
+        };
+        self.run_merge(candidates, horizon)
     }
 
     /// Compact unconditionally.
     pub fn force_compact(&self, horizon: Csn) -> usize {
+        let candidates = { self.inner.read().unwrap().parts.clone() };
+        self.run_merge(candidates, horizon)
+    }
+
+    /// Two-phase merge: build outside the lock, install under it.
+    ///
+    /// This is the fix for the M0 defect where compaction held the write lock
+    /// for the whole merge and collapsed write throughput 18×. Writers keep
+    /// running throughout phase 1; any tombstones they produce are replayed
+    /// into the merged part during phase 2.
+    fn run_merge(&self, candidates: Vec<Arc<Part>>, horizon: Csn) -> usize {
+        if candidates.is_empty() {
+            return 0;
+        }
+        // Reserve an id up front so phase 1 needs no shared mutable state.
+        let new_id = {
+            let mut inner = self.inner.write().unwrap();
+            let id = inner.next_part_id;
+            inner.next_part_id += 1;
+            id
+        };
+        let started_at = self.csn.current();
+
+        // ---- Phase 1: no locks held. This is the expensive part. ----
+        let plan = match compaction::plan_merge(&candidates, new_id, horizon, started_at) {
+            Some(p) => p,
+            None => return 0,
+        };
+        drop(candidates);
+
+        // ---- Phase 2: pointer swap plus tombstone replay. ----
         let mut inner = self.inner.write().unwrap();
-        let TableInner {
-            parts,
-            next_part_id,
-            ..
-        } = &mut *inner;
-        compaction::compact(parts, next_part_id, horizon, &self.metrics)
+        compaction::apply_plan(&mut inner.parts, plan, &self.metrics)
+    }
+
+    // ---- recovery hooks -------------------------------------------------
+
+    /// Replace the part list wholesale. Used by recovery after loading part
+    /// files from disk; never call this on a live table.
+    pub fn install_parts(&self, parts: Vec<Arc<Part>>, next_part_id: u64) {
+        let mut inner = self.inner.write().unwrap();
+        inner.parts = parts;
+        inner.next_part_id = next_part_id;
+    }
+
+    /// Apply a logged insert during recovery, preserving its original CSN.
+    ///
+    /// Unlike [`Table::upsert`] this does not allocate a CSN — replay must
+    /// reproduce the exact version stamps the original run wrote, or snapshots
+    /// taken before the crash would resolve differently after it.
+    pub fn replay_insert(&self, row: Row, csn: Csn) {
+        let mut inner = self.inner.write().unwrap();
+        let snap = Snapshot::at(csn.saturating_sub(1));
+        if let Some(loc) = Self::locate(&inner, row.pk, snap, &self.metrics) {
+            let _ = Self::tombstone(&mut inner, loc, csn);
+        }
+        inner.l0.insert(row, csn);
+    }
+
+    /// Apply a logged delete during recovery.
+    pub fn replay_delete(&self, pk: i64, csn: Csn) {
+        let mut inner = self.inner.write().unwrap();
+        let snap = Snapshot::at(csn.saturating_sub(1));
+        if let Some(loc) = Self::locate(&inner, pk, snap, &self.metrics) {
+            let _ = Self::tombstone(&mut inner, loc, csn);
+        }
+    }
+
+    /// Current parts and the next part id, for checkpointing.
+    pub fn parts_snapshot(&self) -> (Vec<Arc<Part>>, u64) {
+        let inner = self.inner.read().unwrap();
+        (inner.parts.clone(), inner.next_part_id)
     }
 
     pub fn stats(&self) -> TableStats {

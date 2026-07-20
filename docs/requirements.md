@@ -988,7 +988,8 @@ ack + ACID), and partly trivial ("compiles without warnings"). Restated:
 | FR-03 | Scans observe snapshot-isolated state; readers never block writers or each other | P0 |
 | FR-04 | Transactions commit atomically with configurable durability (§7.2) | P0 |
 | FR-05 | Published on-disk state is a valid open-format table readable by an external engine | P0 |
-| FR-06 | Crash recovery restores the last committed state; recovery time is bounded by WAL tail size, **not** by database size | P0 |
+| FR-06a | Crash recovery restores the last committed state; **log replay** time is bounded by WAL tail size, not by database size | P0 |
+| FR-06b | **Time to first query** after restart is bounded independently of database size. Requires demand-paged parts — see `m1-findings.md` §3, which found M1 met FR-06a exactly while total recovery still scaled | P0 |
 | FR-07 | Compaction maintains scan performance under sustained write load without manual intervention | P0 |
 | FR-08 | SELECT supports projection, filter, aggregation, sort, limit, and inner/outer joins | P0 |
 | FR-09 | Results are exposed as Arrow RecordBatches over the native Rust API | P0 |

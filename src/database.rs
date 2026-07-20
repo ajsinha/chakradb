@@ -97,6 +97,11 @@ impl Database {
         self.len() == 0
     }
 
+    /// Raise the CSN floor so recovery never reissues a replayed stamp.
+    pub fn set_csn_floor(&self, csn: Csn) {
+        self.csn.set_floor(csn);
+    }
+
     /// A snapshot consistent across every table.
     pub fn snapshot(&self) -> Snapshot {
         self.csn.snapshot()

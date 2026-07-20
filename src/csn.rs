@@ -46,6 +46,14 @@ impl CsnGenerator {
         self.next.load(Ordering::SeqCst) - 1
     }
 
+    /// Ensure the next allocation is above `csn`.
+    ///
+    /// Used by recovery: the CSN counter must never hand out a value that a
+    /// replayed record already used, or two rows would share a version stamp.
+    pub fn set_floor(&self, csn: Csn) {
+        self.next.fetch_max(csn + 1, Ordering::SeqCst);
+    }
+
     /// Take a snapshot of the current committed state.
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
@@ -198,6 +206,24 @@ mod tests {
     fn snapshots_order_naturally() {
         assert!(Snapshot::at(1) < Snapshot::at(2));
         assert_eq!(Snapshot::at(3), Snapshot::at(3));
+    }
+
+    #[test]
+    fn floor_raises_but_never_lowers() {
+        let g = CsnGenerator::new();
+        g.set_floor(100);
+        assert_eq!(g.allocate(), 101);
+        g.set_floor(50);
+        assert_eq!(g.allocate(), 102, "floor must never move backwards");
+    }
+
+    #[test]
+    fn floor_makes_recovered_csns_safe() {
+        let g = CsnGenerator::new();
+        // Recovery saw records up to CSN 500.
+        g.set_floor(500);
+        let next = g.allocate();
+        assert!(next > 500, "would have reused a recovered CSN");
     }
 
     #[test]

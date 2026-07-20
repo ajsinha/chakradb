@@ -31,3 +31,7 @@ codegen-units = 4
 
 [profile.bench]
 inherits = "release"
+
+[[bin]]
+name = "m1-bench"
+path = "src/bin/m1_bench.rs"

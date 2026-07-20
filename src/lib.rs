@@ -58,28 +58,38 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod backpressure;
 pub mod bloom;
 pub mod clock;
+pub mod codec;
 pub mod compaction;
 pub mod csn;
 pub mod database;
 pub mod delete_vector;
+pub mod durability;
 pub mod error;
 pub mod io;
 pub mod l0;
+pub mod manifest;
 pub mod metrics;
 pub mod part;
+pub mod persist;
 pub mod rng;
 pub mod schema;
+pub mod storage;
 pub mod table;
+pub mod wal;
 
+pub use backpressure::{Backpressure, BackpressureConfig};
 pub use clock::{Clock, RealClock, SimClock};
+pub use durability::Durability;
 pub use csn::{Csn, CsnGenerator, Snapshot};
 pub use database::Database;
 pub use error::{Error, Result};
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use rng::Rng;
 pub use schema::{Batch, Row};
+pub use storage::{Storage, StorageConfig};
 pub use table::{Table, TableConfig, TableStats};
 
 /// Crate version, for benchmark reports.

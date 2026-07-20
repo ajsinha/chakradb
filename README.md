@@ -4,10 +4,11 @@ An embedded, single-process analytical database that accepts a continuous
 high-rate write stream while serving scans that never block — with on-disk state
 other engines can read directly.
 
-> **Status: M0 complete.** This repository currently contains a deliberately
-> throwaway risk-reduction prototype, not a database. It has no durability, no
-> SQL, and no persistence. See [`docs/m0-findings.md`](docs/m0-findings.md) for
-> what it proved and what it did not.
+> **Status: M1 complete.** This repository contains a durable storage engine —
+> write-ahead logging, crash recovery, checkpointing and compaction — but no SQL
+> layer yet, and it has only ever run against an in-memory filesystem.
+> See [`docs/m1-findings.md`](docs/m1-findings.md) for what it proved and what it
+> did not.
 
 ---
 
@@ -42,8 +43,9 @@ docs/
   requirements.md        Architecture & design specification (v2.0)
   roadmap.md             M0–M5 with decision gates and stop conditions
   m0-findings.md         M0 results, including the negative ones
+  m1-findings.md         M1 results: durability, recovery, crash testing
   archive/               Superseded documents
-src/                     M0 prototype (zero dependencies)
+src/                     Engine (zero dependencies)
 tests/                   Integration suites
 ```
 
@@ -55,8 +57,9 @@ Start with `docs/requirements.md` §1–§3 for the wedge and the cost model, th
 ## Trying the prototype
 
 ```bash
-cargo test                              # 224 tests, ~1s
-cargo run --release --bin m0-bench      # the M0 acceptance measurements
+cargo test                              # 335 tests, ~2s
+cargo run --release --bin m0-bench      # M0 acceptance measurements
+cargo run --release --bin m1-bench      # M1 acceptance measurements
 ```
 
 ```rust
@@ -81,6 +84,23 @@ explicit non-goal** — referential integrity is the application's business.
 
 ---
 
+## What M1 established
+
+| Result | Number |
+|---|---|
+| Crash injections passed | **~700 seeded trials**, all durability modes |
+| Group-commit batching | **8× fewer fsyncs than commits** at 16 writer threads |
+| Log replay time | **flat at 1.4 ms** across 20× database growth |
+| Compaction's cost to write throughput | **18.4× → 1.56×** after the two-phase fix |
+
+Two data-loss bugs were found by testing rather than by inspection: compaction
+starving writers (M0), and a stale durable watermark after WAL truncation that
+made post-checkpoint commits skip their fsync (M1). Both are regression-tested.
+
+FR-06 had to be **split**: log replay is bounded by the WAL tail exactly as
+designed, but total recovery still scales with database size because parts load
+eagerly. That needs M2's buffer pool.
+
 ## What M0 established
 
 | Result | Number |
@@ -95,9 +115,9 @@ primary key, the ordinal position in the index *is* the row offset — so no
 key→location map exists to pay for. The comparable explicit map would cost ~12
 B/row, which is what forced StarRocks to build an LSM for its index.
 
-Two defects were found and are recorded as blockers for M1: compaction holds the
-table write lock for the whole merge (collapsing write throughput 18×), and the
-fan-out result assumed a key distribution friendly to min/max bounds.
+Both M0 defects are now fixed: compaction no longer holds the write lock through
+the merge, and the fan-out result has been re-verified against a key distribution
+chosen to defeat min/max bounds.
 
 ---
 
