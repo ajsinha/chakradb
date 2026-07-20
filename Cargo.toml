@@ -40,3 +40,4 @@ path = "src/bin/m1_bench.rs"
 [[bin]]
 name = "m2-bench"
 path = "src/bin/m2_bench.rs"
+
