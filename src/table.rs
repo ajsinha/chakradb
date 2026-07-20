@@ -255,6 +255,17 @@ impl Table {
         inner.next_part_id = next_part_id;
     }
 
+    /// Insert a row assumed new, allocating a fresh CSN and skipping the
+    /// duplicate-key probe. Backs `Storage::load_batch`.
+    pub fn replay_insert_new(&self, row: Row) -> Csn {
+        let mut inner = self.inner.write().unwrap();
+        let csn = self.csn.allocate();
+        inner.l0.insert(row, csn);
+        Metrics::bump(&self.metrics.inserts);
+        self.maybe_seal_locked(&mut inner);
+        csn
+    }
+
     /// Apply a logged insert during recovery, preserving its original CSN.
     ///
     /// Unlike [`Table::upsert`] this does not allocate a CSN — replay must

@@ -208,7 +208,18 @@ pub struct MemFile {
 #[derive(Default, Debug)]
 struct MemFileInner {
     live: Vec<u8>,
+    /// Bytes durable so far, as a copy taken at the last sync.
+    ///
+    /// Kept as an owned image rather than a length, because writes can land
+    /// before the current durable frontier (e.g. `truncate` then rewrite), and
+    /// a crash must restore exactly what was synced. To avoid the O(n) clone on
+    /// every sync that made bulk benchmarks quadratic, the clone is skipped when
+    /// nothing has changed since the last sync.
     durable: Vec<u8>,
+    /// Serial number of the last write, and of the last sync, so `sync` can tell
+    /// whether a copy is actually needed.
+    write_seq: u64,
+    synced_seq: u64,
 }
 
 impl MemFile {
@@ -260,6 +271,7 @@ impl File for MemFile {
             inner.live.resize(end, 0);
         }
         inner.live[offset as usize..end].copy_from_slice(buf);
+        inner.write_seq += 1;
         Ok(buf.len())
     }
 
@@ -274,7 +286,10 @@ impl File for MemFile {
             std::thread::sleep(delay);
         }
         let mut inner = self.inner.lock().unwrap();
-        inner.durable = inner.live.clone();
+        if inner.write_seq != inner.synced_seq {
+            inner.durable = inner.live.clone();
+            inner.synced_seq = inner.write_seq;
+        }
         Ok(())
     }
 
@@ -285,6 +300,7 @@ impl File for MemFile {
     fn truncate(&self, len: u64) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.live.resize(len as usize, 0);
+        inner.write_seq += 1;
         Ok(())
     }
 }
