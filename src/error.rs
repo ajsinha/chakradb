@@ -20,6 +20,8 @@ pub enum Error {
     TableNotFound(String),
     /// Attempt to create a table whose name is taken.
     TableExists(String),
+    /// A SQL parse, plan, or type error.
+    Sql(String),
 }
 
 impl fmt::Display for Error {
@@ -30,6 +32,7 @@ impl fmt::Display for Error {
             Error::WriteConflict => write!(f, "write conflict; retry the transaction"),
             Error::TableNotFound(name) => write!(f, "table not found: {name}"),
             Error::TableExists(name) => write!(f, "table already exists: {name}"),
+            Error::Sql(msg) => write!(f, "sql error: {msg}"),
         }
     }
 }

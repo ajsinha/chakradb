@@ -4,7 +4,7 @@ An embedded, single-process analytical database that accepts a continuous
 high-rate write stream while serving scans that never block — with on-disk state
 other engines can read directly.
 
-> **Status: M1 complete.** This repository contains a durable storage engine —
+> **Status: M2 substantially complete (Gate 2 pending a DuckDB comparison).** This repository contains a durable storage engine —
 > write-ahead logging, crash recovery, checkpointing and compaction — but no SQL
 > layer yet, and it has only ever run against an in-memory filesystem.
 > See [`docs/m1-findings.md`](docs/m1-findings.md) for what it proved and what it
@@ -44,6 +44,7 @@ docs/
   roadmap.md             M0–M5 with decision gates and stop conditions
   m0-findings.md         M0 results, including the negative ones
   m1-findings.md         M1 results: durability, recovery, crash testing
+  m2-findings.md         M2 results: query layer, buffer pool, the Gate-2 gap
   archive/               Superseded documents
 src/                     Engine (zero dependencies)
 tests/                   Integration suites
@@ -60,6 +61,7 @@ Start with `docs/requirements.md` §1–§3 for the wedge and the cost model, th
 cargo test                              # 337 tests, ~2s
 cargo run --release --bin m0-bench      # M0 acceptance measurements
 cargo run --release --bin m1-bench      # M1 acceptance measurements
+cargo run --release --bin m2-bench      # M2 / NFR-03 measurements
 ```
 
 ```rust
@@ -76,6 +78,19 @@ users.update(Row::new(1, 999, 1.5, "alice-v2"))?;
 
 assert_eq!(users.get(1, before).unwrap().c, "alice");
 assert_eq!(users.get_latest(1).unwrap().c, "alice-v2");
+```
+
+Or through SQL (M2), over the fixed four-column schema:
+
+```rust
+use chakradb::{Database, SqlEngine};
+use std::sync::Arc;
+
+let sql = SqlEngine::new(Arc::new(Database::new()));
+sql.run("CREATE TABLE t (pk INT)").unwrap();
+sql.run("INSERT INTO t VALUES (1, 100, 1.5, 'alice')").unwrap();
+let rows = sql.query("SELECT c FROM t WHERE a > 50").unwrap();
+assert_eq!(rows[0][0], "alice");
 ```
 
 Many tables share one snapshot clock, so a read across several of them observes a

@@ -182,7 +182,22 @@ sustained load.
 
 ---
 
-## M2 — Query Layer
+## M2 — Query Layer ⚠️ **SUBSTANTIALLY COMPLETE — GATE 2 UNDECIDED**
+
+> **Outcome: proceed with a caveat that matters.** See `m2-findings.md`.
+> Done: demand-paged parts (FR-06b — reopen flat at ~0.02ms, zero column bytes
+> read); real `PosixIo`; incremental checkpoint (fixed an O(n²) that predated
+> M2); a SQL layer (`sqlparser` + interpreter) with a sqllogictest harness (M2-1)
+> and in-process SQLancer oracles (M2-2, found 2 bugs). NFR-03 measured through
+> SQL: **2.14× degradation under 346k concurrent upserts, readers never block**.
+>
+> **Gate 2 is NOT passed — it cannot be evaluated here.** Its decisive criterion
+> is a decisive win *over DuckDB*, and DuckDB is not installed in this
+> environment. M2-3 is measured absolutely but not against DuckDB; M2-4
+> (ClickBench/TPC-H vs DuckDB) is unmeasured. Recording Gate 2 as passed would
+> repeat the exact mistake the gate warns against — treating "it works" as "it
+> wins". **Required before Gate 2: install DuckDB, run the head-to-head.**
+>
 
 **Goal:** become a database rather than a storage engine — and get the first honest comparison
 against DuckDB.
