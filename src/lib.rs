@@ -83,6 +83,7 @@ pub mod sql;
 pub mod storage;
 pub mod storage_config;
 pub mod table;
+pub mod value;
 pub mod wal;
 
 pub use backpressure::{Backpressure, BackpressureConfig};
@@ -96,6 +97,7 @@ pub use metrics::{Metrics, MetricsSnapshot};
 pub use posix::{PosixIo, TempDir};
 pub use rng::Rng;
 pub use schema::{Batch, Row};
+pub use value::{DataType, Value};
 pub use sql::SqlEngine;
 pub use storage::{Storage, StorageConfig};
 pub use table::{Table, TableConfig, TableStats};
