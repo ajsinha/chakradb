@@ -118,7 +118,13 @@ to unimplemented compaction.
 
 ## M1 — Durable Single-Table Engine ✅ **COMPLETE**
 
-> **Outcome: PROCEED.** See `m1-findings.md`.
+> **Outcome: PROCEED** — 3 of 5 criteria met as written, 2 with stated caveats.
+> See `m1-findings.md` for the per-criterion assessment.
+>
+> **Outstanding:** the 6-hour soak (M1-3) is runnable but has not been run —
+> `CHAKRA_SOAK_SECS=21600 cargo test --release --test soak`. It should gate M2's
+> completion rather than block its start. FR-06 (M1-2) was split rather than met.
+>
 > WAL with group commit (8× fsync batching at 16 threads), crash-safe
 > checkpointing via generation-versioned parts, recovery, and backpressure.
 > ~700 seeded crash injections pass. The M0 compaction defect is fixed:

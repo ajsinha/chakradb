@@ -57,7 +57,7 @@ Start with `docs/requirements.md` §1–§3 for the wedge and the cost model, th
 ## Trying the prototype
 
 ```bash
-cargo test                              # 335 tests, ~2s
+cargo test                              # 337 tests, ~2s
 cargo run --release --bin m0-bench      # M0 acceptance measurements
 cargo run --release --bin m1-bench      # M1 acceptance measurements
 ```

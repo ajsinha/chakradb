@@ -106,20 +106,42 @@ fn crash_trial(seed: u64, ops: usize, mode: Durability, checkpoints: bool) -> (u
     (acked, t.row_count(snap))
 }
 
+/// Number of randomized crash trials. The M1-1 criterion is >=10,000.
+///
+/// The full run takes ~40 s, which is too slow for an inner dev loop, so the
+/// default here is a smoke-sized subset and the full count is opt-in:
+///
+/// ```sh
+/// CHAKRA_CRASH_TRIALS=10000 cargo test --release --test crash_consistency
+/// ```
+///
+/// CI runs the full count. Reporting M1-1 as met on the smoke subset would be
+/// dishonest, so the acceptance figure quoted in `m1-findings.md` comes from a
+/// full run, recorded there with the exact command.
+fn trial_count(default: u64) -> u64 {
+    std::env::var("CHAKRA_CRASH_TRIALS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 #[test]
 fn group_mode_survives_crashes_across_many_seeds() {
     // M1-1. Each seed is an independent randomized crash point.
+    let n = trial_count(300);
     let mut total_acked = 0;
-    for seed in 0..300 {
+    for seed in 0..n {
         let (acked, _) = crash_trial(seed, 400, Durability::Group, false);
         total_acked += acked;
     }
     assert!(total_acked > 0, "workload never acknowledged anything");
+    eprintln!("M1-1: {n} crash trials passed, {total_acked} acknowledged writes verified");
 }
 
 #[test]
 fn sync_mode_survives_crashes() {
-    for seed in 300..400 {
+    let n = trial_count(100);
+    for seed in 100_000..100_000 + n {
         crash_trial(seed, 200, Durability::Sync, false);
     }
 }
@@ -128,7 +150,8 @@ fn sync_mode_survives_crashes() {
 fn crashes_during_checkpointing_are_safe() {
     // The dangerous window: part files are being written while the manifest
     // still points at the previous generation.
-    for seed in 400..600 {
+    let n = trial_count(200);
+    for seed in 200_000..200_000 + n {
         crash_trial(seed, 500, Durability::Group, true);
     }
 }
