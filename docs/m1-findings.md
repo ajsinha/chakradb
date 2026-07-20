@@ -1,10 +1,10 @@
 # M1 Findings — Durable Single-Table Engine
 
 **Milestone:** M1 (see `roadmap.md`)
-**Status:** Complete
-**Verdict:** **PROCEED to M2**, with one requirement formally reclassified and two
-items carried forward.
-**Artifacts:** `src/` (~6,000 lines), 335 tests, `cargo run --release --bin m1-bench`
+**Status:** Complete — 3 of 5 acceptance criteria met as written, 2 with stated caveats
+**Verdict:** **PROCEED to M2**, with one requirement formally reclassified and one
+criterion (the 6-hour soak) runnable but not yet run.
+**Artifacts:** `src/` (~6,000 lines), 337 tests, `cargo run --release --bin m1-bench`
 
 ---
 
@@ -112,6 +112,29 @@ discipline fixes it.
 
 ---
 
+## 4b. Write latency under concurrent scan load (M1-5 as written)
+
+The isolated-writer table below answers an easier question than the criterion
+does. Measured properly — one writer, four scan threads running continuously
+against the same table:
+
+| mode | p50 | p99 | p999 | max | scans completed |
+|---|---|---|---|---|---|
+| sync | 607 µs | 1,817 µs | 2,244 µs | 3,082 µs | 1,760 |
+| group | 533 µs | 1,720 µs | 2,142 µs | 2,490 µs | 1,713 |
+| async | 18 µs | 1,371 µs | 1,652 µs | 1,796 µs | 476 |
+
+**Concurrent scans cost roughly 3.5× on write p50** (154 → 533 µs for `group`)
+and push p99 to 1.7 ms. That is a real tail-latency interaction and it belongs in
+the record: NFR-03 cares about scan throughput under write load, but the converse
+— write latency under *scan* load — is also a cost, and it is not small.
+
+One counter-intuitive detail: `async` completes far fewer scans (476 vs ~1,750).
+Because its writes are ~30× faster, it generates far more L0 churn, and the
+scanners pay for it. Faster writes are not free to readers.
+
+---
+
 ## 4. Group commit works, but only under concurrency
 
 | writer threads | appends | syncs | syncs/append |
@@ -183,20 +206,30 @@ otherwise.
 
 ---
 
-## 7. Sustained ingest reaches equilibrium
+## 7. Sustained ingest reaches equilibrium — but the 6-hour run has not happened
 
-5-second proxy for the roadmap's 6-hour soak (that belongs in CI, not in an
-interactive run):
+The criterion is *"sustained ingest for ≥6 hours"*. **That run has not been
+performed.** `tests/soak.rs` makes it runnable, with duration configurable:
 
-- 77,000 upserts applied
-- part count: first 1, **peak 8, final 8**
-- 314 compactions, 53,598 rows live at end
+```sh
+CHAKRA_SOAK_SECS=21600 cargo test --release --test soak -- --nocapture
+```
 
-Final equals peak rather than exceeding it — compaction keeps up. A monotonically
-climbing part count would have meant it could not.
+What *has* been run:
 
-**Carried to M2:** the real multi-hour soak, in CI, with memory tracked across the
-whole run.
+| duration | ops | parts peak | parts final | head avg | tail avg | compactions |
+|---|---|---|---|---|---|---|
+| 5 s | 80,000 | 8 | 8 | 3.7 | 6.4 | 357 |
+| 60 s | 327,500 | 8 | 8 | 4.9 | 7.3 | 2,333 |
+
+The invariant the long run would be checking — **part count plateaus rather than
+climbing** — holds at both durations, and holds at 12× the duration without the
+peak moving. That is meaningful evidence but it is not the criterion, and this
+document does not claim otherwise.
+
+**Carried to M2:** the actual 6-hour run, in CI, with RSS tracked across it. The
+open risk a short run cannot detect is slow growth — a leak or a compaction
+deficit that only becomes visible after hours.
 
 ---
 
@@ -225,7 +258,7 @@ failure to delete wastes space without threatening correctness.
 
 ## 9. Test coverage
 
-**335 tests**, all passing, ~2 s wall clock.
+**337 tests**, all passing, ~2 s wall clock.
 
 | Suite | Tests | Covers |
 |---|---|---|
@@ -240,6 +273,7 @@ failure to delete wastes space without threatening correctness.
 | `mvcc.rs` | 10 | Snapshot isolation invariants |
 | `concurrency.rs` / `determinism.rs` | 14 | Non-blocking reads, seeded workload replay |
 | `hostile_keys.rs` | 5 | Fan-out under distributions chosen to defeat min/max bounds |
+| `soak.rs` | 2 | Sustained-ingest equilibrium; state survives restart |
 
 The crash suite asserts the actual contract: **every write acknowledged before
 the crash is present after recovery, with its correct value, and every deleted key
@@ -252,25 +286,30 @@ and requiring the surviving prefix to be intact.
 
 | Criterion | Result |
 |---|---|
-| M1-1 · survives randomized crash injection | ✅ ~700 seeded trials, all modes, incl. mid-checkpoint |
-| M1-2 · recovery bounded by WAL tail | ⚠️ **Split.** Replay flat at 1.4 ms (met); total recovery scales (deferred to M2) |
-| M1-3 · sustained ingest at equilibrium | ✅ Part count peaks and holds at 8; proxy soak only |
-| M1-4 · backpressure before degradation, observable | ✅ Mechanism correct; ⚠️ constants untuned |
-| M1-5 · write latency per durability mode | ✅ Documented; group commit 8× batching at 16 threads |
+| M1-1 · ≥10,000 randomized crash injections | ✅ **Met.** 10,000 trials, **1,674,229 acknowledged writes verified**, all durability modes, incl. mid-checkpoint. Run with `CHAKRA_CRASH_TRIALS=10000` |
+| M1-2 · recovery flat as DB grows 10× | ⚠️ **Split, not met as written.** Replay flat at 1.4 ms (FR-06a met); total recovery scales (FR-06b → M2) |
+| M1-3 · sustained ingest ≥6 hours | ⚠️ **Not run.** Equilibrium invariant holds at 5 s and 60 s with the peak unmoved; the 6-hour run is runnable and pending |
+| M1-4 · backpressure before degradation, observable | ✅ **Met.** ⚠️ constants untuned |
+| M1-5 · p99 write latency under concurrent scan load | ✅ **Met.** Measured with 4 concurrent scanners; group p99 1.72 ms, and the scan-load cost (~3.5× on p50) documented |
 
-**Verdict: proceed to M2.** No finding suggests the architecture is wrong. The one
-reclassification (FR-06) is a case of the requirement having been written more
+**Verdict: proceed to M2.** Three criteria met as written, two with stated
+caveats. No finding suggests the architecture is wrong.
+
+The FR-06 reclassification is a case of the requirement having been written more
 broadly than the mechanism it named could deliver — worth fixing in the spec now
-rather than discovering at M2.
+rather than discovering at M2. The outstanding soak is a matter of elapsed time,
+not of unknown risk, and it should gate M2's completion rather than block its
+start.
 
 ### Carried into M2
 
-1. **Demand-paged buffer pool** — the prerequisite for FR-06b, and now the
+1. **Run the 6-hour soak** (`CHAKRA_SOAK_SECS=21600`) with RSS tracked, in CI.
+   This is the one M1 criterion still outstanding.
+2. **Demand-paged buffer pool** — the prerequisite for FR-06b, and now the
    highest-value structural work remaining.
-2. **Tune backpressure constants** against a real workload.
+3. **Tune backpressure constants** against a real workload.
    Also revisit Bloom false-positive rate: under overlapping key spans it is the
    only thing standing between a lookup and a full fan-out scan.
-3. **Multi-hour soak in CI**, with memory tracked.
 4. **Real `PosixIo`** — everything so far runs on `MemIo`. The seam exists and is
    exercised, but no test has yet touched a real filesystem, so real fsync
    ordering and partial-write behaviour remain unverified.

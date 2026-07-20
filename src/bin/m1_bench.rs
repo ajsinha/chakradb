@@ -162,6 +162,77 @@ fn m1_5_durability_latency(out: &mut String) {
     );
 }
 
+/// M1-5 as actually written: latency **under concurrent scan load**.
+///
+/// The isolated-writer table above is easier to read but does not answer the
+/// criterion — a writer contending with scanners is a different measurement,
+/// and it is the one NFR-03 cares about.
+fn m1_5_under_scan_load(out: &mut String) {
+    const ROWS: i64 = 50_000;
+    const WRITES: usize = 3_000;
+    out.push_str("\n### Write latency with scanners running concurrently\n\n");
+    out.push_str(
+        "Four scan threads run continuously against the same table while one writer is\n\
+         measured. This is the criterion as stated; the isolated table above is context.\n\n\
+         | mode | p50 (µs) | p99 | p999 | max | scans completed |\n|---|---|---|---|---|---|\n",
+    );
+    let clock = RealClock::new();
+    for mode in [Durability::Sync, Durability::Group, Durability::Async] {
+        let io: Arc<MemIo> = Arc::new(MemIo::new());
+        io.set_sync_delay(SYNC_COST);
+        let s = Arc::new(Storage::open(io, cfg(mode, 25_000)).unwrap());
+        s.create_table("t").unwrap();
+        for pk in 0..ROWS {
+            s.insert("t", row(pk, "v0")).unwrap();
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let scans = Arc::new(AtomicU64::new(0));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let s = s.clone();
+                let stop = stop.clone();
+                let scans = scans.clone();
+                thread::spawn(move || {
+                    let t = s.database().table("t").unwrap();
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = t.scan(s.database().snapshot());
+                        scans.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+
+        let mut rng = Rng::new(11);
+        let mut lat = Vec::with_capacity(WRITES);
+        for _ in 0..WRITES {
+            let pk = rng.range(0, ROWS);
+            let t0 = clock.now_nanos();
+            let _ = s.upsert("t", row(pk, "vN"));
+            lat.push(clock.now_nanos() - t0);
+        }
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            r.join().unwrap();
+        }
+
+        let d = Dist::new(lat);
+        out.push_str(&format!(
+            "| {} | {:.2} | {:.2} | {:.2} | {:.2} | {} |\n",
+            mode.name(),
+            d.pct(0.50) as f64 / 1000.0,
+            d.pct(0.99) as f64 / 1000.0,
+            d.pct(0.999) as f64 / 1000.0,
+            d.pct(1.0) as f64 / 1000.0,
+            scans.load(Ordering::Relaxed),
+        ));
+    }
+    out.push_str(
+        "\nThe p999/max columns are the interesting ones: they show whether scan traffic\n\
+         introduces tail latency on the write path.\n",
+    );
+}
+
 fn m1_5_group_commit_scaling(out: &mut String) {
     out.push_str("\n### Group-commit batching under concurrency\n\n");
     out.push_str("| writer threads | appends | syncs | syncs/append |\n|---|---|---|---|\n");
@@ -393,6 +464,7 @@ fn main() {
 
     m1_2_recovery_scaling(&mut out);
     m1_5_durability_latency(&mut out);
+    m1_5_under_scan_load(&mut out);
     m1_5_group_commit_scaling(&mut out);
     m1_4_backpressure(&mut out);
     m0_defect_recheck(&mut out);
