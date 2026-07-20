@@ -14,6 +14,7 @@ publish = false
 #   * the trait Io / Clock / Rng seams are real rather than inherited
 # M1+ will introduce arrow-rs, roaring, and a real WAL.
 [dependencies]
+sqlparser = "0.62"
 
 [lib]
 name = "chakradb"
@@ -35,3 +36,7 @@ inherits = "release"
 [[bin]]
 name = "m1-bench"
 path = "src/bin/m1_bench.rs"
+
+[[bin]]
+name = "m2-bench"
+path = "src/bin/m2_bench.rs"
