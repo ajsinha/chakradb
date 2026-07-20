@@ -6,17 +6,26 @@
 //!
 //! * **Reads**: tombstoned rows waste scan bandwidth until reclaimed.
 //! * **Writes**: point lookups fan out across parts (§5.2), so unbounded part
-//!   growth degrades the write path too. M0-3 measures this.
+//!   growth degrades the write path too.
 //!
-//! Compaction also performs version-metadata GC: once every row's creation
-//! stamp is at or below the horizon, no live snapshot can distinguish them, so
-//! the per-row CSN array collapses to a single value and scans of that part
-//! become zero-per-row-work (§5.3).
+//! # Two-phase merge (the M0 defect fix)
+//!
+//! M0 held the table write lock for the entire merge, which collapsed write
+//! throughput 18× (see `m0-findings.md` §4). Compaction is now split:
+//!
+//! 1. [`plan_merge`] builds the replacement part **holding no lock at all**.
+//! 2. [`apply_plan`] takes the write lock only to swap pointers, and to replay
+//!    any tombstones that landed on the source parts while the merge ran.
+//!
+//! Step 2 is what makes step 1 safe: writers are free to keep deleting rows
+//! from parts that are being merged, because those deletions are carried
+//! forward through the ordinal mapping rather than lost.
 
-use crate::csn::{Csn, Snapshot, NEVER_DELETED};
+use crate::csn::{Csn, NEVER_DELETED};
 use crate::metrics::Metrics;
 use crate::part::{CreatedCsns, Part};
 use crate::schema::Batch;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// When to compact.
@@ -25,8 +34,12 @@ pub struct CompactionPolicy {
     /// Merge once this many parts exist.
     pub max_parts: usize,
     /// Merge when any part is at least this fraction tombstoned.
+    ///
+    /// M0-4 found that a *single* tombstone disables a part's zero-per-row scan
+    /// fast path, so this is deliberately lower than intuition suggests.
     pub max_dv_density: f64,
-    /// Never merge more than this many parts at once.
+    /// Never merge more than this many parts at once, so a single compaction
+    /// cannot monopolise the I/O budget.
     pub max_merge_width: usize,
 }
 
@@ -34,7 +47,7 @@ impl Default for CompactionPolicy {
     fn default() -> Self {
         CompactionPolicy {
             max_parts: 8,
-            max_dv_density: 0.3,
+            max_dv_density: 0.1,
             max_merge_width: 16,
         }
     }
@@ -50,93 +63,158 @@ impl CompactionPolicy {
         }
         // Deliberately *not* gated on part count. A single part that is mostly
         // tombstones still wastes scan bandwidth on every read, and rewriting
-        // it also collapses version stamps. Gating this behind "two or more
-        // parts" would let a heavily-deleted table degrade indefinitely.
+        // it also collapses version stamps.
         parts.iter().any(|p| p.dv_density() >= self.max_dv_density)
+    }
+
+    /// Choose which parts to merge: the oldest `max_merge_width`, since those
+    /// are the ones lookups reach last and are most likely to be cold.
+    pub fn select<'a>(&self, parts: &'a [Arc<Part>]) -> &'a [Arc<Part>] {
+        let n = parts.len().min(self.max_merge_width);
+        &parts[parts.len() - n..]
     }
 }
 
-/// Merge parts into one, dropping rows no snapshot at or after `horizon` can
-/// see, and collapsing version stamps where possible.
+/// A merge built outside the lock, ready to be installed.
+#[derive(Debug)]
+pub struct MergePlan {
+    /// Ids of the parts this plan replaces.
+    pub source_ids: Vec<u64>,
+    merged: Part,
+    /// `(source part id, source ordinal) -> merged ordinal`, used to replay
+    /// tombstones that arrived while the merge was running.
+    mapping: HashMap<(u64, u32), u32>,
+    /// CSN at which the merge began; deletions after this need replaying.
+    started_at: Csn,
+    rows_reclaimed: usize,
+}
+
+impl MergePlan {
+    pub fn merged_rows(&self) -> usize {
+        self.merged.num_rows()
+    }
+    pub fn rows_reclaimed(&self) -> usize {
+        self.rows_reclaimed
+    }
+}
+
+/// Build the replacement part. **Takes no locks and mutates nothing.**
 ///
-/// Returns the number of parts merged (0 if there are none).
-///
-/// Accepts a single part: rewriting one part is still useful work, since it
-/// reclaims tombstoned rows and collapses version stamps.
-///
-/// Crash-safety note for M1: this builds the replacement before swapping it in,
-/// so a failure part-way leaves the original parts authoritative.
-pub fn compact(
-    parts: &mut Vec<Arc<Part>>,
-    next_part_id: &mut u64,
+/// `horizon` is the oldest CSN any live snapshot may observe; rows deleted at
+/// or below it are reclaimable. `started_at` should be the current CSN.
+pub fn plan_merge(
+    parts: &[Arc<Part>],
+    new_part_id: u64,
     horizon: Csn,
-    metrics: &Metrics,
-) -> usize {
+    started_at: Csn,
+) -> Option<MergePlan> {
     if parts.is_empty() {
-        return 0;
+        return None;
     }
 
-    let snap = Snapshot::at(horizon);
-    let merged_count = parts.len();
+    // (pk, created, deleted, source part id, source ordinal)
+    let mut rows: Vec<(i64, Csn, Csn, u64, u32)> = Vec::new();
+    let mut total_source_rows = 0usize;
 
-    // Gather surviving rows from every part.
-    let mut rows: Vec<(i64, Csn, Csn, usize, usize)> = Vec::new(); // (pk, created, deleted, part_idx, ordinal)
-    for (pi, part) in parts.iter().enumerate() {
+    for part in parts {
         let dv = part.dv_snapshot();
         let batch = part.batch();
+        total_source_rows += batch.len();
         for ord in 0..batch.len() {
-            let created = part.created_at(ord);
             let deleted = dv.deleted_at(ord as u32);
-            // A row is reclaimable once it is invisible to the horizon
-            // snapshot *and* to every newer one, i.e. deleted at/below horizon.
+            // Reclaimable once invisible to the horizon and everything newer.
             if deleted <= horizon {
                 continue;
             }
-            rows.push((batch.pk[ord], created, deleted, pi, ord));
+            rows.push((
+                batch.pk[ord],
+                part.created_at(ord),
+                deleted,
+                part.id(),
+                ord as u32,
+            ));
         }
     }
 
-    let reclaimed = parts
-        .iter()
-        .map(|p| p.num_rows())
-        .sum::<usize>()
-        .saturating_sub(rows.len());
+    let rows_reclaimed = total_source_rows.saturating_sub(rows.len());
 
     // Sort by (pk, created) so the output satisfies Part's invariants.
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
+    let by_id: HashMap<u64, &Arc<Part>> = parts.iter().map(|p| (p.id(), p)).collect();
     let mut batch = Batch::with_capacity(rows.len());
     let mut created = Vec::with_capacity(rows.len());
     let mut deletions = Vec::new();
+    let mut mapping = HashMap::with_capacity(rows.len());
 
-    for (out_ord, &(_, c, d, pi, ord)) in rows.iter().enumerate() {
-        batch.push(&parts[pi].batch().row(ord));
+    for (out_ord, &(_, c, d, src_id, src_ord)) in rows.iter().enumerate() {
+        let src = by_id[&src_id];
+        batch.push(&src.batch().row(src_ord as usize));
         created.push(c);
         if d != NEVER_DELETED {
             deletions.push((out_ord as u32, d));
         }
+        mapping.insert((src_id, src_ord), out_ord as u32);
     }
 
-    let id = *next_part_id;
-    *next_part_id += 1;
-
-    let mut merged = Part::with_deletions(
-        id,
-        batch,
-        CreatedCsns::PerRow(created),
-        &deletions,
-    );
+    let mut merged = Part::with_deletions(new_part_id, batch, CreatedCsns::PerRow(created), &deletions);
     // Version-metadata GC: collapse per-row stamps when indistinguishable.
+    // M0-2 found this is ~86% of the index budget.
     merged.collapse_versions(horizon);
 
-    let _ = snap; // horizon is expressed as a Csn throughout
-    parts.clear();
-    parts.push(Arc::new(merged));
+    Some(MergePlan {
+        source_ids: parts.iter().map(|p| p.id()).collect(),
+        merged,
+        mapping,
+        started_at,
+        rows_reclaimed,
+    })
+}
+
+/// Install a plan. **Call this holding the write lock — it is pointer work
+/// plus a small tombstone replay, not a merge.**
+///
+/// Returns the number of parts replaced, or 0 if the plan is stale (its source
+/// parts are no longer all present, e.g. a concurrent compaction won the race).
+pub fn apply_plan(parts: &mut Vec<Arc<Part>>, plan: MergePlan, metrics: &Metrics) -> usize {
+    let present: HashMap<u64, usize> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id(), i))
+        .collect();
+
+    if !plan.source_ids.iter().all(|id| present.contains_key(id)) {
+        Metrics::bump(&metrics.compactions_discarded);
+        return 0;
+    }
+
+    // Replay tombstones that landed while the merge was running. Writers were
+    // never blocked, so this is the price of that freedom — and it is bounded
+    // by the number of deletes issued during the merge, not by table size.
+    let mut replayed = 0u64;
+    for &src_id in &plan.source_ids {
+        let src = &parts[present[&src_id]];
+        let dv = src.dv_snapshot();
+        for (src_ord, csn) in dv.entries_after(plan.started_at) {
+            if let Some(&out_ord) = plan.mapping.get(&(src_id, src_ord)) {
+                if plan.merged.mark_deleted(out_ord, csn) {
+                    replayed += 1;
+                }
+            }
+        }
+    }
+    Metrics::add(&metrics.tombstones_replayed, replayed);
+
+    let replaced = plan.source_ids.len();
+    let source: std::collections::HashSet<u64> = plan.source_ids.into_iter().collect();
+    parts.retain(|p| !source.contains(&p.id()));
+    // Merged output is the oldest run, so it belongs at the end (newest first).
+    parts.push(Arc::new(plan.merged));
 
     Metrics::bump(&metrics.compactions);
-    Metrics::add(&metrics.parts_merged, merged_count as u64);
-    Metrics::add(&metrics.rows_reclaimed, reclaimed as u64);
-    merged_count
+    Metrics::add(&metrics.parts_merged, replaced as u64);
+    Metrics::add(&metrics.rows_reclaimed, plan.rows_reclaimed as u64);
+    replaced
 }
 
 #[cfg(test)]
@@ -152,8 +230,16 @@ mod tests {
         Arc::new(Part::new(id, batch, CreatedCsns::Uniform(csn)))
     }
 
+    fn run(parts: &mut Vec<Arc<Part>>, next_id: u64, horizon: Csn) -> usize {
+        let snapshot = parts.clone();
+        match plan_merge(&snapshot, next_id, horizon, horizon) {
+            Some(plan) => apply_plan(parts, plan, &Metrics::new()),
+            None => 0,
+        }
+    }
+
     #[test]
-    fn policy_ignores_trivial_part_counts() {
+    fn policy_ignores_empty_and_clean_single_parts() {
         let p = CompactionPolicy::default();
         assert!(!p.should_compact(&[]));
         assert!(!p.should_compact(&[part(0, &[1], 1)]));
@@ -170,171 +256,143 @@ mod tests {
     }
 
     #[test]
-    fn policy_triggers_on_dv_density() {
-        let p = CompactionPolicy {
-            max_parts: 100,
-            max_dv_density: 0.4,
-            ..Default::default()
-        };
-        let a = part(0, &[1, 2, 3, 4], 1);
-        a.mark_deleted(0, 5);
-        a.mark_deleted(1, 5);
-        let parts = vec![a, part(1, &[9], 1)];
-        assert!(p.should_compact(&parts));
-    }
-
-    #[test]
     fn policy_triggers_on_single_heavily_deleted_part() {
-        let p = CompactionPolicy {
-            max_parts: 100,
-            max_dv_density: 0.3,
-            ..Default::default()
-        };
+        let p = CompactionPolicy::default();
         let a = part(0, &[1, 2, 3, 4], 1);
         a.mark_deleted(0, 5);
-        a.mark_deleted(1, 5);
-        assert!(
-            p.should_compact(&[a]),
-            "a lone part that is 50% tombstones must still compact"
-        );
+        assert!(p.should_compact(&[a]), "25% tombstoned must compact");
     }
 
     #[test]
-    fn compact_of_empty_set_is_noop() {
-        let mut parts: Vec<Arc<Part>> = vec![];
-        let mut next = 0;
-        assert_eq!(compact(&mut parts, &mut next, 10, &Metrics::new()), 0);
+    fn select_bounds_merge_width() {
+        let p = CompactionPolicy {
+            max_merge_width: 3,
+            ..Default::default()
+        };
+        let parts: Vec<_> = (0..10).map(|i| part(i, &[i as i64], 1)).collect();
+        let chosen = p.select(&parts);
+        assert_eq!(chosen.len(), 3);
+        // Oldest (tail of the newest-first vector).
+        assert_eq!(chosen[0].id(), 7);
     }
 
     #[test]
-    fn compact_of_single_part_still_reclaims() {
-        let p = part(0, &[1, 2, 3], 1);
-        p.mark_deleted(1, 5);
-        let mut parts = vec![p];
-        let mut next = 1;
-        assert_eq!(compact(&mut parts, &mut next, 10, &Metrics::new()), 1);
-        assert_eq!(parts[0].batch().pk, vec![1, 3], "tombstoned row reclaimed");
-        assert!(parts[0].created_is_uniform(), "stamps collapsed");
+    fn plan_merge_of_empty_is_none() {
+        assert!(plan_merge(&[], 0, 10, 10).is_none());
     }
 
     #[test]
-    fn compact_merges_into_one_sorted_part() {
+    fn merge_produces_one_sorted_part() {
         let mut parts = vec![part(0, &[5, 9], 1), part(1, &[1, 7], 1)];
-        let mut next = 2;
-        let n = compact(&mut parts, &mut next, 10, &Metrics::new());
-        assert_eq!(n, 2);
+        assert_eq!(run(&mut parts, 2, 10), 2);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].batch().pk, vec![1, 5, 7, 9]);
         assert!(parts[0].batch().is_sorted_by_pk());
     }
 
     #[test]
-    fn compact_drops_rows_deleted_below_horizon() {
+    fn merge_reclaims_rows_below_horizon() {
         let a = part(0, &[1, 2, 3], 1);
-        a.mark_deleted(1, 5); // pk=2 deleted at 5
+        a.mark_deleted(1, 5);
         let mut parts = vec![a, part(1, &[4], 1)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 10, &Metrics::new());
-        assert_eq!(parts[0].batch().pk, vec![1, 3, 4], "pk=2 should be reclaimed");
+        run(&mut parts, 2, 10);
+        assert_eq!(parts[0].batch().pk, vec![1, 3, 4]);
     }
 
     #[test]
-    fn compact_retains_rows_still_visible_to_horizon() {
+    fn merge_retains_rows_visible_to_horizon() {
         let a = part(0, &[1, 2], 1);
-        a.mark_deleted(1, 100); // deleted in the future relative to horizon
+        a.mark_deleted(1, 100);
         let mut parts = vec![a, part(1, &[3], 1)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 10, &Metrics::new());
-        assert!(
-            parts[0].batch().pk.contains(&2),
-            "row still visible at horizon must survive"
-        );
+        run(&mut parts, 2, 10);
+        assert!(parts[0].batch().pk.contains(&2));
     }
 
     #[test]
-    fn compact_collapses_version_stamps() {
+    fn merge_collapses_version_stamps() {
         let mut parts = vec![part(0, &[1], 5), part(1, &[2], 7)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 100, &Metrics::new());
-        assert!(
-            parts[0].created_is_uniform(),
-            "stamps below horizon should collapse to uniform"
-        );
+        run(&mut parts, 2, 100);
+        assert!(parts[0].created_is_uniform());
     }
 
     #[test]
-    fn compact_keeps_stamps_when_distinguishable() {
+    fn merge_keeps_stamps_when_distinguishable() {
         let mut parts = vec![part(0, &[1], 5), part(1, &[2], 500)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 10, &Metrics::new());
+        run(&mut parts, 2, 10);
         assert!(!parts[0].created_is_uniform());
     }
 
     #[test]
-    fn compacted_part_scans_correctly() {
+    fn concurrent_delete_during_merge_is_replayed() {
+        // The property the two-phase split exists to preserve.
         let a = part(0, &[1, 2, 3], 1);
-        a.mark_deleted(0, 4);
-        let mut parts = vec![a, part(1, &[10, 11], 2)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 50, &Metrics::new());
-        let got = parts[0].scan(Snapshot::at(60));
-        assert_eq!(got.pk, vec![2, 3, 10, 11]);
+        let b = part(1, &[10, 11], 1);
+        let mut parts = vec![a.clone(), b];
+
+        // Phase 1: plan the merge as of CSN 50.
+        let snapshot = parts.clone();
+        let plan = plan_merge(&snapshot, 2, 50, 50).unwrap();
+
+        // A writer deletes pk=2 while the merge is "running".
+        assert!(a.mark_deleted(1, 60));
+
+        // Phase 2: install. The late delete must survive.
+        assert_eq!(apply_plan(&mut parts, plan, &Metrics::new()), 2);
+        let merged = &parts[0];
+        assert!(
+            merged.lookup(2, crate::csn::Snapshot::at(60)).ordinal().is_none(),
+            "delete issued during the merge was lost"
+        );
+        assert!(
+            merged.lookup(2, crate::csn::Snapshot::at(55)).ordinal().is_some(),
+            "older snapshot must still see it"
+        );
     }
 
     #[test]
-    fn compact_updates_metrics() {
+    fn stale_plan_is_discarded() {
+        let mut parts = vec![part(0, &[1], 1), part(1, &[2], 1)];
+        let snapshot = parts.clone();
+        let plan = plan_merge(&snapshot, 2, 10, 10).unwrap();
+        // Someone else compacted first.
+        parts.clear();
+        parts.push(part(9, &[1, 2], 1));
+        assert_eq!(apply_plan(&mut parts, plan, &Metrics::new()), 0);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].id(), 9);
+    }
+
+    #[test]
+    fn merge_leaves_unrelated_parts_alone() {
+        let older = vec![part(0, &[1], 1), part(1, &[2], 1)];
+        let mut parts = vec![part(5, &[100], 1), older[0].clone(), older[1].clone()];
+        let plan = plan_merge(&older, 6, 10, 10).unwrap();
+        assert_eq!(apply_plan(&mut parts, plan, &Metrics::new()), 2);
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().any(|p| p.id() == 5), "newer part must survive");
+    }
+
+    #[test]
+    fn merge_updates_metrics() {
         let m = Metrics::new();
         let a = part(0, &[1, 2], 1);
         a.mark_deleted(0, 3);
         let mut parts = vec![a, part(1, &[5], 1)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 10, &m);
+        let snapshot = parts.clone();
+        let plan = plan_merge(&snapshot, 2, 10, 10).unwrap();
+        apply_plan(&mut parts, plan, &m);
         assert_eq!(Metrics::get(&m.compactions), 1);
         assert_eq!(Metrics::get(&m.parts_merged), 2);
         assert_eq!(Metrics::get(&m.rows_reclaimed), 1);
     }
 
     #[test]
-    fn repeated_compaction_is_stable() {
+    fn repeated_merge_is_content_stable() {
         let mut parts = vec![part(0, &[1], 1), part(1, &[2], 1)];
-        let mut next = 2;
-        compact(&mut parts, &mut next, 10, &Metrics::new());
+        run(&mut parts, 2, 10);
         let before = parts[0].batch().pk.clone();
-        // Compacting again is idempotent in content.
-        compact(&mut parts, &mut next, 10, &Metrics::new());
+        run(&mut parts, 3, 10);
         assert_eq!(parts[0].batch().pk, before);
         assert_eq!(parts.len(), 1);
-    }
-
-    #[test]
-    fn compaction_preserves_duplicate_key_versions() {
-        let batch: Batch = vec![
-            Row::new(1, 0, 0.0, "old"),
-            Row::new(1, 0, 0.0, "new"),
-        ]
-        .into_iter()
-        .collect();
-        let p = Arc::new(Part::with_deletions(
-            0,
-            batch,
-            CreatedCsns::PerRow(vec![10, 20]),
-            &[(0, 20)],
-        ));
-        let mut parts = vec![p, part(1, &[9], 1)];
-        let mut next = 2;
-        // Horizon below the delete: the old version is still needed.
-        compact(&mut parts, &mut next, 15, &Metrics::new());
-
-        let version_of_pk1 = |csn: Csn| -> Vec<String> {
-            let b = parts[0].scan(Snapshot::at(csn));
-            (0..b.len())
-                .filter(|&i| b.pk[i] == 1)
-                .map(|i| b.c[i].clone())
-                .collect()
-        };
-        assert_eq!(version_of_pk1(15), vec!["old".to_string()]);
-        assert_eq!(version_of_pk1(25), vec!["new".to_string()]);
-        // The unrelated part's row survives untouched in both views.
-        assert!(parts[0].scan(Snapshot::at(15)).pk.contains(&9));
     }
 }

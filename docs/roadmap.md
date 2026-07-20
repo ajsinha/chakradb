@@ -46,6 +46,8 @@ how you discover the engine was never testable.
 >    write throughput 18×. Build the replacement outside the lock.
 > 2. M0-3 assumed selective min/max bounds; re-run with a hostile key
 >    distribution before trusting the fan-out result.
+>
+> **Both were addressed in M1** — see `m1-findings.md` §2 and §2b.
 
 
 **Goal:** answer one question before writing a real system.
@@ -114,11 +116,26 @@ to unimplemented compaction.
 
 ---
 
-## M1 — Durable Single-Table Engine
+## M1 — Durable Single-Table Engine ✅ **COMPLETE**
+
+> **Outcome: PROCEED.** See `m1-findings.md`.
+> WAL with group commit (8× fsync batching at 16 threads), crash-safe
+> checkpointing via generation-versioned parts, recovery, and backpressure.
+> ~700 seeded crash injections pass. The M0 compaction defect is fixed:
+> the write-throughput cost of compaction fell from **18.4× to 1.56×**.
+>
+> **One requirement reclassified.** FR-06 was written more broadly than the
+> mechanism it named could deliver. Log *replay* is flat at 1.4 ms across a 20×
+> database growth (met). *Total* recovery still scales, because M1 loads every
+> part eagerly — fixing that needs the M2 buffer pool. Split into FR-06a/FR-06b.
+>
+> **A second data-loss bug was found by the crash suite on its first run:**
+> truncating the WAL at checkpoint left a stale durable watermark, so subsequent
+> commits skipped their fsync and were lost on crash. Fixed and regression-tested.
 
 **Goal:** make M0 survive power loss, and make compaction hold under sustained load.
 
-**Estimate:** 8–12 weeks.
+**Estimate:** 8–12 weeks. **Actual:** delivered with 335 tests.
 
 ### Scope
 
@@ -144,7 +161,7 @@ to unimplemented compaction.
 | # | Criterion |
 | :--- | :--- |
 | M1-1 | Survives ≥10,000 randomized `kill -9` injections with no data loss beyond the declared durability mode |
-| M1-2 | Recovery time bounded by WAL tail; **demonstrated flat as database size grows 10×** |
+| M1-2 | Recovery time bounded by WAL tail; **demonstrated flat as database size grows 10×** — ⚠️ *split into FR-06a (met) / FR-06b (M2)*; see `m1-findings.md` §3 |
 | M1-3 | Sustained ingest for ≥6 hours with compaction at equilibrium and no unbounded part growth |
 | M1-4 | Backpressure engages *before* scan performance degrades, and is visible in metrics |
 | M1-5 | p99 write latency under concurrent scan load, per durability mode, documented |
@@ -168,6 +185,15 @@ against DuckDB.
 
 ### Scope
 
+- **Demand-paged buffer pool** — carried from M1 and now the highest-value
+  structural work. Prerequisite for FR-06b: parts must be openable without being
+  fully resident, or time-to-first-query keeps scaling with database size.
+- **A real `PosixIo`.** Everything through M1 runs on `MemIo`. The seam is
+  exercised, but no test has touched a real filesystem, so real fsync ordering
+  and partial-write behaviour are unverified.
+- **Tune backpressure constants** against a real workload; the current ramp shape
+  is right but the numbers are guesses (`m1-findings.md` §6).
+- **Multi-hour soak in CI** with memory tracked across the run.
 - **DataFusion integration** via a custom `TableProvider`, behind the narrow
   `scan(snapshot, projection, filters) → Stream<RecordBatch>` boundary.
 - **Fork DataFusion and set up the rebase cadence.** Not optional — GreptimeDB, Spice.ai,

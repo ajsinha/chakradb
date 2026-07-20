@@ -119,6 +119,18 @@ impl DeleteVector {
             .collect()
     }
 
+    /// Entries recorded strictly after `csn`, as `(ordinal, deleted_csn)`.
+    ///
+    /// Used by two-phase compaction to replay tombstones that landed while a
+    /// merge was running outside the lock.
+    pub fn entries_after(&self, csn: Csn) -> Vec<(u32, Csn)> {
+        self.entries
+            .iter()
+            .filter(|(_, c)| *c > csn)
+            .copied()
+            .collect()
+    }
+
     /// Approximate resident bytes.
     pub fn memory_bytes(&self) -> usize {
         self.entries.capacity() * std::mem::size_of::<(u32, Csn)>()
@@ -245,6 +257,17 @@ mod tests {
             dv.mark_deleted(o, 1);
         }
         assert!((dv.density(100) - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn entries_after_filters_by_csn() {
+        let mut dv = DeleteVector::new();
+        dv.mark_deleted(1, 10);
+        dv.mark_deleted(2, 50);
+        dv.mark_deleted(3, 90);
+        assert_eq!(dv.entries_after(50), vec![(3, 90)]);
+        assert_eq!(dv.entries_after(0).len(), 3);
+        assert!(dv.entries_after(90).is_empty());
     }
 
     #[test]
