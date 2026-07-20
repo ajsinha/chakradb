@@ -1,0 +1,33 @@
+[package]
+name = "chakradb"
+version = "0.0.0-m0"
+edition = "2021"
+rust-version = "1.85"
+description = "ChakraDB M0 prototype — risk-reduction spike for embedded transactional HTAP"
+license = "Apache-2.0"
+publish = false
+
+# M0 is a deliberately throwaway prototype (see docs/roadmap.md).
+# Zero dependencies is a design choice, not an accident:
+#   * determinism is fully under our control (no hidden RNG, no ambient clock)
+#   * builds are instant, so the test loop stays tight
+#   * the trait Io / Clock / Rng seams are real rather than inherited
+# M1+ will introduce arrow-rs, roaring, and a real WAL.
+[dependencies]
+
+[lib]
+name = "chakradb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "m0-bench"
+path = "src/bin/m0_bench.rs"
+
+[profile.release]
+opt-level = 3
+debug = true          # keep symbols; we profile release builds
+lto = "thin"
+codegen-units = 4
+
+[profile.bench]
+inherits = "release"
