@@ -204,6 +204,19 @@ impl Wal {
         Ok(end)
     }
 
+    /// Append without syncing, regardless of durability mode. The caller is
+    /// responsible for a later `flush`. Used by bulk load.
+    pub fn append_async(&self, rec: &WalRecord) -> io::Result<u64> {
+        let bytes = rec.encode();
+        let _g = self.append_lock.lock().unwrap();
+        let offset = self.written.load(Ordering::SeqCst);
+        self.file.pwrite(offset, &bytes)?;
+        let end = offset + bytes.len() as u64;
+        self.written.store(end, Ordering::SeqCst);
+        self.appends.fetch_add(1, Ordering::Relaxed);
+        Ok(end)
+    }
+
     /// Make everything up to `offset` durable, batching with concurrent callers.
     pub fn commit_to(&self, offset: u64) -> io::Result<()> {
         // `begin` blocks until either our offset is durable or we are elected

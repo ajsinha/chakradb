@@ -72,11 +72,15 @@ pub mod io;
 pub mod l0;
 pub mod manifest;
 pub mod metrics;
+pub mod pager;
 pub mod part;
+#[cfg(unix)]
+pub mod posix;
 pub mod persist;
 pub mod rng;
 pub mod schema;
 pub mod storage;
+pub mod storage_config;
 pub mod table;
 pub mod wal;
 
@@ -87,6 +91,8 @@ pub use csn::{Csn, CsnGenerator, Snapshot};
 pub use database::Database;
 pub use error::{Error, Result};
 pub use metrics::{Metrics, MetricsSnapshot};
+#[cfg(unix)]
+pub use posix::{PosixIo, TempDir};
 pub use rng::Rng;
 pub use schema::{Batch, Row};
 pub use storage::{Storage, StorageConfig};

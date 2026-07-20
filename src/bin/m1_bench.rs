@@ -1,13 +1,6 @@
-//! M1 acceptance benchmark.
-//!
-//! Produces the measurements the M1 gate is judged on (`docs/roadmap.md` §M1):
-//!
-//! * **M1-2** recovery time bounded by WAL tail, flat as the database grows
-//! * **M1-3** sustained ingest with compaction at equilibrium
-//! * **M1-4** backpressure engages before scans degrade, and is observable
-//! * **M1-5** write latency under concurrent scan load, per durability mode
-//!
-//! Plus the M0 defect re-measurement: compaction no longer starves writers.
+//! M1 acceptance benchmark (`docs/roadmap.md` §M1): recovery scaling (M1-2),
+//! FR-06b lazy open, durability latency (M1-5), backpressure (M1-4), the M0
+//! compaction-defect re-check, and a short ingest soak (M1-3).
 //!
 //! `cargo run --release --bin m1-bench`
 
@@ -120,6 +113,39 @@ fn m1_2_recovery_scaling(out: &mut String) {
     );
 }
 
+// --------------------------------------------------------------- FR-06b
+
+fn fr06b_lazy_open(out: &mut String) {
+    out.push_str("\n## FR-06b — Lazy open (M2 buffer-pool work)\n\n");
+    out.push_str(
+        "M1 loaded every part eagerly, so total recovery scaled with database size. M2\n\
+         registers parts from a bounded summary frame and faults column data in on first\n\
+         touch. After a clean checkpoint, open reads O(parts) bytes, not O(rows).\n\n\
+         | checkpointed rows | open (ms) | parts | column bytes read at open |\n|---|---|---|---|\n",
+    );
+    let clock = RealClock::new();
+    for &n in &[20_000i64, 100_000, 400_000] {
+        let io: Arc<MemIo> = Arc::new(MemIo::new());
+        {
+            let s = Storage::open(io.clone(), cfg(Durability::Group, 25_000)).unwrap();
+            s.create_table("t").unwrap();
+            s.load_batch("t", (0..n).map(|pk| row(pk, "v")).collect()).unwrap();
+            s.checkpoint().unwrap();
+        }
+        let t0 = clock.now_nanos();
+        let s2 = Storage::open(io, cfg(Durability::Group, 25_000)).unwrap();
+        let ns = clock.now_nanos() - t0;
+        out.push_str(&format!(
+            "| {} | {:.2} | {} | {} |\n",
+            n,
+            ns as f64 / 1e6,
+            s2.recovery().parts_loaded,
+            s2.pager_metrics().bytes_faulted.load(std::sync::atomic::Ordering::Relaxed),
+        ));
+    }
+    out.push_str("\nColumn bytes at open should be **0** at every size — that is FR-06b. Open time rises only with part *count* (O(parts) summary frames), the honest residual.\n");
+}
+
 // ------------------------------------------------------------------ M1-5
 
 fn m1_5_durability_latency(out: &mut String) {
@@ -227,10 +253,7 @@ fn m1_5_under_scan_load(out: &mut String) {
             scans.load(Ordering::Relaxed),
         ));
     }
-    out.push_str(
-        "\nThe p999/max columns are the interesting ones: they show whether scan traffic\n\
-         introduces tail latency on the write path.\n",
-    );
+    out.push_str("\nThe p999/max columns show whether scan traffic introduces write-path tail latency.\n");
 }
 
 fn m1_5_group_commit_scaling(out: &mut String) {
@@ -311,10 +334,7 @@ fn m1_4_backpressure(out: &mut String) {
             m.backpressure_nanos as f64 / 1e6,
         ));
     }
-    out.push_str(
-        "\nWithout maintenance, part count climbs and backpressure engages — visibly, in\n\
-         metrics, which is the requirement. With it, debt stays bounded.\n",
-    );
+    out.push_str("\nWithout maintenance parts climb and backpressure engages (visible in metrics); with it, debt stays bounded.\n");
 }
 
 // ------------------------------------------------------------------ M0 defect
@@ -393,6 +413,7 @@ fn m0_defect_recheck(out: &mut String) {
     out.push_str("\nThe two rows should now be within the same order of magnitude.\n");
 }
 
+
 // ------------------------------------------------------------------ M1-3
 
 fn m1_3_soak(out: &mut String) {
@@ -463,6 +484,7 @@ fn main() {
     ));
 
     m1_2_recovery_scaling(&mut out);
+    fr06b_lazy_open(&mut out);
     m1_5_durability_latency(&mut out);
     m1_5_under_scan_load(&mut out);
     m1_5_group_commit_scaling(&mut out);

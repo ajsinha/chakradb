@@ -18,10 +18,67 @@ use std::io;
 use std::sync::Arc;
 
 const PART_MAGIC: u32 = 0x4348_4B50; // "CHKP"
-const PART_VERSION: u8 = 1;
+const PART_VERSION: u8 = 2;
+const SUMMARY_MAGIC: u32 = 0x4348_4B53; // "CHKS"
 
 const STAMPS_UNIFORM: u8 = 0;
 const STAMPS_PER_ROW: u8 = 1;
+
+/// Encode the resident summary: bounds, row count, version range.
+///
+/// Written **first** in the file so that opening a database can read a bounded
+/// prefix per part rather than the whole thing. That is what makes time-to-first
+/// -query independent of database size (FR-06b) — see `pager.rs`.
+pub fn encode_summary(part: &Part) -> Vec<u8> {
+    let mut e = Encoder::with_capacity(64);
+    e.u32(SUMMARY_MAGIC)
+        .u8(PART_VERSION)
+        .u64(part.id())
+        .u64(part.num_rows() as u64)
+        .i64(part.min_pk())
+        .i64(part.max_pk())
+        .u64(part.created_min())
+        .u64(part.created_max());
+    frame(e.as_slice())
+}
+
+fn decode_summary(payload: &[u8]) -> Result<crate::pager::PartSummary, DecodeError> {
+    let mut d = Decoder::new(payload);
+    if d.u32()? != SUMMARY_MAGIC {
+        return Err(DecodeError::Malformed("bad summary magic"));
+    }
+    if d.u8()? != PART_VERSION {
+        return Err(DecodeError::Malformed("unsupported part version"));
+    }
+    Ok(crate::pager::PartSummary {
+        id: d.u64()?,
+        num_rows: d.u64()? as usize,
+        min_pk: d.i64()?,
+        max_pk: d.i64()?,
+        created_min: d.u64()?,
+        created_max: d.u64()?,
+    })
+}
+
+/// Read only the summary frame — a bounded read, regardless of part size.
+pub fn read_part_summary(io: &dyn Io, path: &str) -> io::Result<crate::pager::PartSummary> {
+    let f = io.open(path)?;
+    // The summary frame is first and small; 8 bytes of header tell us its size.
+    let mut head = [0u8; 8];
+    let n = f.pread(0, &mut head)?;
+    if n < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "part file too short for a summary",
+        ));
+    }
+    let len = u32::from_le_bytes(head[0..4].try_into().unwrap()) as usize;
+    let mut buf = vec![0u8; 8 + len];
+    f.pread(0, &mut buf)?;
+    let (payload, _) = unframe(&buf, 0)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    decode_summary(payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
 
 /// Encode a part's immutable image (everything except later tombstones).
 pub fn encode_part(part: &Part) -> Vec<u8> {
@@ -125,7 +182,9 @@ fn decode_tombstones(payload: &[u8]) -> Result<Vec<(u32, Csn)>, DecodeError> {
 pub fn write_part(io: &dyn Io, path: &str, part: &Part) -> io::Result<Arc<dyn File>> {
     let f = io.open(path)?;
     f.truncate(0)?;
-    f.pwrite(0, &encode_part(part))?;
+    let mut img = encode_summary(part);
+    img.extend_from_slice(&encode_part(part));
+    f.pwrite(0, &img)?;
     let dv = part.dv_snapshot();
     let entries = dv.entries_after(0);
     if !entries.is_empty() {
@@ -162,7 +221,10 @@ pub fn read_part(io: &dyn Io, path: &str) -> io::Result<Part> {
 
 /// Decode a complete part file image.
 pub fn decode_part_file(buf: &[u8]) -> Result<Part, DecodeError> {
-    let (payload, mut pos) = unframe(buf, 0)?;
+    // Frame 0 is the summary; frame 1 is the image; the rest are tombstones.
+    let (summary_payload, after_summary) = unframe(buf, 0)?;
+    decode_summary(summary_payload)?;
+    let (payload, mut pos) = unframe(buf, after_summary)?;
     let (id, batch, created) = decode_part_image(payload)?;
 
     let mut tombstones = Vec::new();
@@ -200,7 +262,7 @@ mod tests {
     #[test]
     fn roundtrip_preserves_rows_and_id() {
         let p = part_of(7, &[1, 5, 9], 42);
-        let got = decode_part_file(&encode_part(&p)).unwrap();
+        let got = decode_part_file(&full_image(&p)).unwrap();
         assert_eq!(got.id(), 7);
         assert_eq!(got.batch().pk, vec![1, 5, 9]);
         assert_eq!(got.batch().c, p.batch().c);
@@ -210,7 +272,7 @@ mod tests {
     #[test]
     fn roundtrip_preserves_uniform_stamps() {
         let p = part_of(1, &[1, 2], 10);
-        let got = decode_part_file(&encode_part(&p)).unwrap();
+        let got = decode_part_file(&full_image(&p)).unwrap();
         assert!(got.created_is_uniform(), "uniform encoding lost");
     }
 
@@ -221,7 +283,7 @@ mod tests {
             .map(|&pk| Row::new(pk, pk, 0.0, ""))
             .collect();
         let p = Part::new(1, batch, CreatedCsns::PerRow(vec![10, 20, 30]));
-        let got = decode_part_file(&encode_part(&p)).unwrap();
+        let got = decode_part_file(&full_image(&p)).unwrap();
         assert!(!got.created_is_uniform());
         assert_eq!(got.created_at(0), 10);
         assert_eq!(got.created_at(2), 30);
@@ -230,7 +292,7 @@ mod tests {
     #[test]
     fn roundtrip_of_empty_part() {
         let p = part_of(3, &[], 1);
-        let got = decode_part_file(&encode_part(&p)).unwrap();
+        let got = decode_part_file(&full_image(&p)).unwrap();
         assert_eq!(got.num_rows(), 0);
         assert_eq!(got.id(), 3);
     }
@@ -244,7 +306,7 @@ mod tests {
         .into_iter()
         .collect();
         let p = Part::new(1, batch.clone(), CreatedCsns::Uniform(1));
-        let got = decode_part_file(&encode_part(&p)).unwrap();
+        let got = decode_part_file(&full_image(&p)).unwrap();
         assert_eq!(got.batch(), &batch);
     }
 
@@ -258,8 +320,14 @@ mod tests {
         assert_eq!(got.scan(Snapshot::at(60)).pk, vec![1, 3]);
     }
 
+    fn full_image(p: &Part) -> Vec<u8> {
+        let mut v = encode_summary(p);
+        v.extend_from_slice(&encode_part(p));
+        v
+    }
+
     fn encode_part_with_dv(p: &Part) -> Vec<u8> {
-        let mut v = encode_part(p);
+        let mut v = full_image(p);
         let entries = p.dv_snapshot().entries_after(0);
         v.extend_from_slice(&encode_tombstones(&entries));
         v
@@ -293,7 +361,7 @@ mod tests {
     #[test]
     fn torn_tombstone_append_is_discarded_prefix_kept() {
         let p = part_of(1, &[1, 2, 3], 5);
-        let mut img = encode_part(&p);
+        let mut img = full_image(&p);
         img.extend_from_slice(&encode_tombstones(&[(0, 40)]));
         let good_len = img.len();
         img.extend_from_slice(&encode_tombstones(&[(1, 41)]));
@@ -308,7 +376,7 @@ mod tests {
     #[test]
     fn truncated_part_image_is_rejected() {
         let p = part_of(1, &[1, 2, 3], 5);
-        let img = encode_part(&p);
+        let img = full_image(&p);
         for cut in 0..img.len() {
             assert!(
                 decode_part_file(&img[..cut]).is_err(),
@@ -320,7 +388,7 @@ mod tests {
     #[test]
     fn corrupted_image_is_rejected() {
         let p = part_of(1, &[1, 2, 3], 5);
-        let mut img = encode_part(&p);
+        let mut img = full_image(&p);
         let mid = img.len() / 2;
         img[mid] ^= 0xFF;
         assert!(decode_part_file(&img).is_err());
@@ -329,8 +397,54 @@ mod tests {
     #[test]
     fn bad_magic_is_rejected() {
         let mut e = Encoder::new();
-        e.u32(0xDEAD_BEEF).u8(1).u64(0).u64(0);
+        e.u32(0xDEAD_BEEF).u8(2).u64(0).u64(0);
         assert!(decode_part_file(&frame(e.as_slice())).is_err());
+    }
+
+    #[test]
+    fn summary_reads_without_decoding_columns() {
+        let io = MemIo::new();
+        let p = part_of(9, &(0..5_000).collect::<Vec<_>>(), 42);
+        write_part(&io, "big", &p).unwrap();
+        let s = read_part_summary(&io, "big").unwrap();
+        assert_eq!(s.id, 9);
+        assert_eq!(s.num_rows, 5_000);
+        assert_eq!(s.min_pk, 0);
+        assert_eq!(s.max_pk, 4_999);
+        assert_eq!(s.created_min, 42);
+        assert_eq!(s.created_max, 42);
+    }
+
+    #[test]
+    fn summary_of_empty_part() {
+        let io = MemIo::new();
+        let p = part_of(1, &[], 7);
+        write_part(&io, "e", &p).unwrap();
+        let s = read_part_summary(&io, "e").unwrap();
+        assert_eq!(s.num_rows, 0);
+    }
+
+    #[test]
+    fn summary_read_is_bounded_regardless_of_part_size() {
+        // The FR-06b property: opening a part is O(1), not O(rows).
+        let io = MemIo::new();
+        let small = part_of(1, &(0..10).collect::<Vec<_>>(), 1);
+        let big = part_of(2, &(0..50_000).collect::<Vec<_>>(), 1);
+        write_part(&io, "s", &small).unwrap();
+        write_part(&io, "b", &big).unwrap();
+
+        let s_len = encode_summary(&small).len();
+        let b_len = encode_summary(&big).len();
+        assert_eq!(s_len, b_len, "summary size must not depend on row count");
+        assert!(s_len < 100, "summary is {s_len} bytes");
+    }
+
+    #[test]
+    fn truncated_summary_is_rejected() {
+        let io = MemIo::new();
+        let f = io.open("bad").unwrap();
+        f.pwrite(0, &[1, 2, 3]).unwrap();
+        assert!(read_part_summary(&io, "bad").is_err());
     }
 
     #[test]
