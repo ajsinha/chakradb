@@ -99,6 +99,18 @@ pub fn plan_in(sql: &str, be: &dyn crate::sql::SqlBackend) -> Result<Plan, Strin
     plan_with(sql, &|name| be.table(name).ok().map(|t| t.schema().clone()))
 }
 
+/// Whether `sql` is a single read query (`SELECT`/`WITH`) — used to route
+/// queries to the DataFusion executor while writes stay on the interpreter.
+pub fn is_query(sql: &str) -> bool {
+    let dialect = PostgreSqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(mut stmts) if stmts.len() == 1 => {
+            matches!(stmts.pop(), Some(sa::Statement::Query(_)))
+        }
+        _ => false,
+    }
+}
+
 fn plan_with(sql: &str, schema_for: SchemaFor) -> Result<Plan, String> {
     let dialect = PostgreSqlDialect {};
     let mut stmts =

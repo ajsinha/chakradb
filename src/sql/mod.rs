@@ -20,6 +20,8 @@
 //! conformance harness it enables.
 
 pub mod backend;
+#[cfg(feature = "datafusion")]
+pub mod df;
 pub mod exec;
 pub mod expr;
 pub mod plan;
@@ -62,7 +64,16 @@ impl SqlEngine {
 
     /// Parse, plan, and execute one statement. Column names resolve against the
     /// live catalog, so each table's declared schema is honoured.
+    ///
+    /// With the `datafusion` feature, read queries are executed by DataFusion's
+    /// vectorised engine over an MVCC snapshot (joins, windows, and subqueries
+    /// included); writes and DDL stay on the interpreter, which owns the snapshot
+    /// clock and the WAL. Without the feature, everything runs on the interpreter.
     pub fn run(&self, sql: &str) -> Result<Outcome, Error> {
+        #[cfg(feature = "datafusion")]
+        if plan::is_query(sql) {
+            return df::execute_query(&*self.backend, sql);
+        }
         let plan = plan_in(sql, &*self.backend).map_err(Error::Sql)?;
         execute(&*self.backend, plan)
     }
@@ -120,7 +131,7 @@ mod tests {
                 .unwrap();
         }
         let rows = e.query("SELECT SUM(a), COUNT(*) FROM t").unwrap();
-        assert_eq!(rows[0][0], "550.0");
+        assert_eq!(rows[0][0], "550");
         assert_eq!(rows[0][1], "10");
     }
 

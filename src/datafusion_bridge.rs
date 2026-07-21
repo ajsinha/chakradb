@@ -35,11 +35,20 @@ use datafusion::datasource::MemTable;
 /// are simply not seen. That is snapshot isolation carried across the executor
 /// boundary — the property the M3 spike exists to prove.
 pub fn snapshot_memtable(table: &Table, snap: Snapshot) -> MemTable {
-    let arrow_schema = table.schema().arrow();
+    let schema = table.schema();
+    // Expose only the user columns — a synthesised `_rowid` key stays hidden, so
+    // DataFusion's `SELECT *` and column resolution match the interpreter.
+    let keep = schema.star_indices();
+    let arrow_schema = std::sync::Arc::new(
+        schema
+            .arrow()
+            .project(&keep)
+            .expect("project to user columns"),
+    );
     let batches: Vec<RecordBatch> = table
         .scan_segments(snap)
         .iter()
-        .map(|seg| seg.batch().record_batch().clone())
+        .map(|seg| seg.batch().record_batch().project(&keep).expect("project batch"))
         .filter(|rb| rb.num_rows() > 0)
         .collect();
     MemTable::try_new(arrow_schema, vec![batches]).expect("memtable from snapshot")

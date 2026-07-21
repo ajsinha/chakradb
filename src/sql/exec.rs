@@ -494,6 +494,10 @@ impl Ord for GroupKey {
 struct Acc {
     count: i64,
     sum: f64,
+    int_sum: i64,
+    /// True while every summed value has been an integer — then SUM stays an
+    /// integer, matching DataFusion/DuckDB (SUM of integers is not a float).
+    all_int: bool,
     min: Option<Value>,
     max: Option<Value>,
     seen_numeric: bool,
@@ -504,6 +508,8 @@ impl Acc {
         Acc {
             count: 0,
             sum: 0.0,
+            int_sum: 0,
+            all_int: true,
             min: None,
             max: None,
             seen_numeric: false,
@@ -518,6 +524,11 @@ impl Acc {
             self.sum += f;
             self.seen_numeric = true;
         }
+        match v {
+            Value::Int(i) => self.int_sum = self.int_sum.wrapping_add(*i),
+            Value::Bool(_) => {}
+            _ => self.all_int = false,
+        }
         if self.min.as_ref().map(|m| v.total_cmp(m).is_lt()).unwrap_or(true) {
             self.min = Some(v.clone());
         }
@@ -529,10 +540,12 @@ impl Acc {
         match f {
             AggFn::Count => Value::Int(if is_star { group_rows } else { self.count }),
             AggFn::Sum => {
-                if self.seen_numeric {
-                    Value::Float(self.sum)
-                } else {
+                if !self.seen_numeric {
                     Value::Null
+                } else if self.all_int {
+                    Value::Int(self.int_sum)
+                } else {
+                    Value::Float(self.sum)
                 }
             }
             AggFn::Avg => {
@@ -726,7 +739,7 @@ mod tests {
         match run(&db, "SELECT COUNT(*), SUM(a), MIN(a), MAX(a), AVG(a) FROM t") {
             Outcome::Rows { rows, .. } => {
                 assert_eq!(rows[0][0], "3");
-                assert_eq!(rows[0][1], "60.0");
+                assert_eq!(rows[0][1], "60");
                 assert_eq!(rows[0][2], "10");
                 assert_eq!(rows[0][3], "30");
                 assert_eq!(rows[0][4], "20.0");

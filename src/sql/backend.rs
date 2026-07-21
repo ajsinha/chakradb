@@ -22,6 +22,9 @@ pub trait SqlBackend: Send + Sync {
     fn create_table(&self, name: &str, schema: Schema) -> Result<()>;
     /// Resolve a table for reads (and schema resolution during planning).
     fn table(&self, name: &str) -> Result<Arc<Table>>;
+    /// Every table name in the catalog (for registering with an external
+    /// executor such as DataFusion).
+    fn table_names(&self) -> Vec<String>;
     /// A snapshot consistent across the catalog.
     fn snapshot(&self) -> Snapshot;
     fn insert(&self, table: &str, row: Row) -> Result<Csn>;
@@ -35,6 +38,9 @@ impl SqlBackend for Database {
     }
     fn table(&self, name: &str) -> Result<Arc<Table>> {
         Database::table(self, name)
+    }
+    fn table_names(&self) -> Vec<String> {
+        Database::table_names(self)
     }
     fn snapshot(&self) -> Snapshot {
         Database::snapshot(self)
@@ -59,6 +65,10 @@ impl SqlBackend for Storage {
         // table so its part list is populated.
         self.warm();
         self.database().table(name)
+    }
+    fn table_names(&self) -> Vec<String> {
+        self.warm();
+        self.database().table_names()
     }
     fn snapshot(&self) -> Snapshot {
         self.database().snapshot()

@@ -28,7 +28,7 @@ fn arbitrary_columns_and_types() {
     assert_eq!(one(&e, "SELECT COUNT(*) FROM items"), "3");
     assert_eq!(one(&e, "SELECT name FROM items WHERE id = 2"), "pear");
     // Aggregate over a user-named float column.
-    assert_eq!(one(&e, "SELECT SUM(qty) FROM items WHERE price < 1.0"), "140.0");
+    assert_eq!(one(&e, "SELECT SUM(qty) FROM items WHERE price < 1.0"), "140");
     // Column resolution by declared name, any order.
     let rows = e.query("SELECT name, qty FROM items ORDER BY price DESC LIMIT 1").unwrap();
     assert_eq!(rows[0], vec!["kiwi".to_string(), "10".to_string()]);
@@ -101,6 +101,6 @@ fn group_by_user_named_column() {
         .query("SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region")
         .unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0], vec!["east".to_string(), "27.0".to_string()]);
-    assert_eq!(rows[1], vec!["west".to_string(), "15.0".to_string()]);
+    assert_eq!(rows[0], vec!["east".to_string(), "27".to_string()]);
+    assert_eq!(rows[1], vec!["west".to_string(), "15".to_string()]);
 }
