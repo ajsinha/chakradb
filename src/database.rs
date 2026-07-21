@@ -198,7 +198,10 @@ mod tests {
     fn missing_table_is_an_error() {
         let db = Database::new();
         assert!(matches!(db.table("nope"), Err(Error::TableNotFound(_))));
-        assert!(matches!(db.drop_table("nope"), Err(Error::TableNotFound(_))));
+        assert!(matches!(
+            db.drop_table("nope"),
+            Err(Error::TableNotFound(_))
+        ));
     }
 
     #[test]

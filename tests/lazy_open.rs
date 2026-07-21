@@ -47,7 +47,10 @@ fn clean_open_does_not_read_column_data() {
     let io = seeded(20_000, 2_000);
     let s = Storage::open(io, cfg(2_000)).unwrap();
 
-    assert!(s.recovery().parts_registered_lazily > 0, "nothing registered");
+    assert!(
+        s.recovery().parts_registered_lazily > 0,
+        "nothing registered"
+    );
     assert_eq!(
         s.pager_metrics().parts_faulted.load(Ordering::Relaxed),
         0,
@@ -86,7 +89,10 @@ fn bounds_reject_absent_keys_without_faulting() {
         0,
         "out-of-range probe faulted a part in"
     );
-    assert!(s.may_contain_key("t", &Value::Int(5_000)), "in-range key was excluded");
+    assert!(
+        s.may_contain_key("t", &Value::Int(5_000)),
+        "in-range key was excluded"
+    );
 }
 
 #[test]
@@ -148,10 +154,16 @@ fn a_wal_tail_forces_warming_and_stays_correct() {
     let snap = db.snapshot();
     assert_eq!(t.row_count(snap), 8_000 - 200 + 100);
     for pk in 0..200 {
-        assert!(t.get(&Value::Int(pk), snap).is_none(), "deleted pk={pk} came back");
+        assert!(
+            t.get(&Value::Int(pk), snap).is_none(),
+            "deleted pk={pk} came back"
+        );
     }
     for pk in 8_000..8_100 {
-        assert!(t.get(&Value::Int(pk), snap).is_some(), "tail insert pk={pk} lost");
+        assert!(
+            t.get(&Value::Int(pk), snap).is_some(),
+            "tail insert pk={pk} lost"
+        );
     }
 }
 

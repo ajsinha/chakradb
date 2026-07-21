@@ -26,9 +26,12 @@ fn durable_sql_survives_reopen_with_arbitrary_schema() {
         let e = SqlEngine::durable(open(io.clone()));
         e.run("CREATE TABLE items (id INT PRIMARY KEY, name TEXT, price FLOAT, qty INT)")
             .unwrap();
-        e.run("INSERT INTO items VALUES (1, 'apple', 0.50, 100)").unwrap();
-        e.run("INSERT INTO items VALUES (2, 'pear', 0.75, 40)").unwrap();
-        e.run("INSERT INTO items VALUES (3, 'kiwi', 1.25, 10)").unwrap();
+        e.run("INSERT INTO items VALUES (1, 'apple', 0.50, 100)")
+            .unwrap();
+        e.run("INSERT INTO items VALUES (2, 'pear', 0.75, 40)")
+            .unwrap();
+        e.run("INSERT INTO items VALUES (3, 'kiwi', 1.25, 10)")
+            .unwrap();
         e.run("DELETE FROM items WHERE id = 2").unwrap();
         e.run("UPDATE items SET qty = 5 WHERE id = 3").unwrap();
         assert_eq!(one(&e, "SELECT COUNT(*) FROM items"), "2");
@@ -37,7 +40,11 @@ fn durable_sql_survives_reopen_with_arbitrary_schema() {
     // Reopen from the same durable medium. WAL replay + manifest schema must
     // reconstruct the arbitrary-schema table exactly.
     let e2 = SqlEngine::durable(open(io));
-    assert_eq!(one(&e2, "SELECT COUNT(*) FROM items"), "2", "row count survived");
+    assert_eq!(
+        one(&e2, "SELECT COUNT(*) FROM items"),
+        "2",
+        "row count survived"
+    );
     assert_eq!(one(&e2, "SELECT name FROM items WHERE id = 1"), "apple");
     // The deleted row stayed deleted; the update stuck.
     assert_eq!(one(&e2, "SELECT COUNT(*) FROM items WHERE id = 2"), "0");
@@ -45,7 +52,8 @@ fn durable_sql_survives_reopen_with_arbitrary_schema() {
     // The float column and its type recovered (aggregate over it works).
     assert_eq!(one(&e2, "SELECT SUM(price) FROM items"), "1.75");
     // New writes continue to work on the recovered schema.
-    e2.run("INSERT INTO items VALUES (4, 'plum', 2.0, 3)").unwrap();
+    e2.run("INSERT INTO items VALUES (4, 'plum', 2.0, 3)")
+        .unwrap();
     assert_eq!(one(&e2, "SELECT COUNT(*) FROM items"), "3");
 }
 
@@ -54,15 +62,22 @@ fn durable_sql_text_primary_key_survives_reopen() {
     let io: Arc<dyn Io> = Arc::new(MemIo::new());
     {
         let e = SqlEngine::durable(open(io.clone()));
-        e.run("CREATE TABLE users (email TEXT PRIMARY KEY, age INT)").unwrap();
-        e.run("INSERT INTO users VALUES ('alice@x.com', 25)").unwrap();
+        e.run("CREATE TABLE users (email TEXT PRIMARY KEY, age INT)")
+            .unwrap();
+        e.run("INSERT INTO users VALUES ('alice@x.com', 25)")
+            .unwrap();
         e.run("INSERT INTO users VALUES ('bob@x.com', 41)").unwrap();
     }
     let e2 = SqlEngine::durable(open(io));
     // The text key recovered and still looks up correctly.
-    assert_eq!(one(&e2, "SELECT age FROM users WHERE email = 'bob@x.com'"), "41");
+    assert_eq!(
+        one(&e2, "SELECT age FROM users WHERE email = 'bob@x.com'"),
+        "41"
+    );
     // The text key still rejects duplicates after recovery.
-    assert!(e2.run("INSERT INTO users VALUES ('alice@x.com', 99)").is_err());
+    assert!(e2
+        .run("INSERT INTO users VALUES ('alice@x.com', 99)")
+        .is_err());
 }
 
 #[test]
@@ -78,7 +93,11 @@ fn durable_sql_pk_less_rowid_table_survives_reopen() {
         e.run("INSERT INTO log VALUES ('warn', 2)").unwrap();
     }
     let e2 = SqlEngine::durable(open(io));
-    assert_eq!(one(&e2, "SELECT COUNT(*) FROM log"), "3", "all three rows survived");
+    assert_eq!(
+        one(&e2, "SELECT COUNT(*) FROM log"),
+        "3",
+        "all three rows survived"
+    );
     // SELECT * still hides the recovered rowid.
     let rows = e2.query("SELECT * FROM log").unwrap();
     assert_eq!(rows[0].len(), 2);

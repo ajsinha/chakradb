@@ -20,33 +20,48 @@ fn arbitrary_columns_and_types() {
     let e = engine();
     e.run("CREATE TABLE items (id INT PRIMARY KEY, name TEXT, price FLOAT, qty INT)")
         .unwrap();
-    e.run("INSERT INTO items VALUES (1, 'apple', 0.50, 100)").unwrap();
-    e.run("INSERT INTO items VALUES (2, 'pear', 0.75, 40)").unwrap();
+    e.run("INSERT INTO items VALUES (1, 'apple', 0.50, 100)")
+        .unwrap();
+    e.run("INSERT INTO items VALUES (2, 'pear', 0.75, 40)")
+        .unwrap();
     e.run("INSERT INTO items (id, name, price, qty) VALUES (3, 'kiwi', 1.25, 10)")
         .unwrap();
 
     assert_eq!(one(&e, "SELECT COUNT(*) FROM items"), "3");
     assert_eq!(one(&e, "SELECT name FROM items WHERE id = 2"), "pear");
     // Aggregate over a user-named float column.
-    assert_eq!(one(&e, "SELECT SUM(qty) FROM items WHERE price < 1.0"), "140");
+    assert_eq!(
+        one(&e, "SELECT SUM(qty) FROM items WHERE price < 1.0"),
+        "140"
+    );
     // Column resolution by declared name, any order.
-    let rows = e.query("SELECT name, qty FROM items ORDER BY price DESC LIMIT 1").unwrap();
+    let rows = e
+        .query("SELECT name, qty FROM items ORDER BY price DESC LIMIT 1")
+        .unwrap();
     assert_eq!(rows[0], vec!["kiwi".to_string(), "10".to_string()]);
 }
 
 #[test]
 fn text_primary_key() {
     let e = engine();
-    e.run("CREATE TABLE users (email TEXT PRIMARY KEY, age INT)").unwrap();
-    e.run("INSERT INTO users VALUES ('carol@x.com', 30)").unwrap();
-    e.run("INSERT INTO users VALUES ('alice@x.com', 25)").unwrap();
+    e.run("CREATE TABLE users (email TEXT PRIMARY KEY, age INT)")
+        .unwrap();
+    e.run("INSERT INTO users VALUES ('carol@x.com', 30)")
+        .unwrap();
+    e.run("INSERT INTO users VALUES ('alice@x.com', 25)")
+        .unwrap();
     e.run("INSERT INTO users VALUES ('bob@x.com', 41)").unwrap();
 
     // Duplicate text key is rejected.
-    assert!(e.run("INSERT INTO users VALUES ('alice@x.com', 99)").is_err());
+    assert!(e
+        .run("INSERT INTO users VALUES ('alice@x.com', 99)")
+        .is_err());
 
     // Lookup by text key.
-    assert_eq!(one(&e, "SELECT age FROM users WHERE email = 'bob@x.com'"), "41");
+    assert_eq!(
+        one(&e, "SELECT age FROM users WHERE email = 'bob@x.com'"),
+        "41"
+    );
     // Text keys order as keys (parts are sorted by the text column).
     let names = e.query("SELECT email FROM users ORDER BY email").unwrap();
     assert_eq!(names[0][0], "alice@x.com");
@@ -74,7 +89,8 @@ fn pk_less_table_uses_hidden_rowid() {
 #[test]
 fn wrong_arity_and_unknown_column_are_errors() {
     let e = engine();
-    e.run("CREATE TABLE t2 (k INT PRIMARY KEY, v TEXT)").unwrap();
+    e.run("CREATE TABLE t2 (k INT PRIMARY KEY, v TEXT)")
+        .unwrap();
     // Too many values for a 2-column table.
     assert!(e.run("INSERT INTO t2 VALUES (1, 'a', 99)").is_err());
     // Unknown column name.
@@ -86,16 +102,14 @@ fn wrong_arity_and_unknown_column_are_errors() {
 #[test]
 fn group_by_user_named_column() {
     let e = engine();
-    e.run("CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT)").unwrap();
+    e.run("CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT)")
+        .unwrap();
     for (i, (r, a)) in [("west", 10), ("east", 20), ("west", 5), ("east", 7)]
         .iter()
         .enumerate()
     {
-        e.run(&format!(
-            "INSERT INTO sales VALUES ({}, '{r}', {a})",
-            i + 1
-        ))
-        .unwrap();
+        e.run(&format!("INSERT INTO sales VALUES ({}, '{r}', {a})", i + 1))
+            .unwrap();
     }
     let rows = e
         .query("SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region")

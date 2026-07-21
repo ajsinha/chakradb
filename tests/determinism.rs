@@ -37,7 +37,9 @@ fn run_workload(seed: u64, ops: usize) -> Vec<(i64, String)> {
     }
 
     let b = t.scan(db.snapshot());
-    let mut out: Vec<(i64, String)> = (0..b.len()).map(|i| (b.key(i).as_int().unwrap(), b.value(3, i).render())).collect();
+    let mut out: Vec<(i64, String)> = (0..b.len())
+        .map(|i| (b.key(i).as_int().unwrap(), b.value(3, i).render()))
+        .collect();
     out.sort();
     out
 }
@@ -96,7 +98,10 @@ fn workload_leaves_a_consistent_table() {
 
     // Every visible key must be individually retrievable.
     for pk in (0..b.len()).map(|i| b.key(i).as_int().unwrap()) {
-        assert!(t.get(&Value::Int(pk), snap).is_some(), "scan/get disagree on {pk}");
+        assert!(
+            t.get(&Value::Int(pk), snap).is_some(),
+            "scan/get disagree on {pk}"
+        );
     }
 }
 
@@ -117,7 +122,8 @@ fn get_and_scan_agree_under_random_workload() {
 
     let snap = db.snapshot();
     let vb = t.scan(snap);
-    let visible: std::collections::HashSet<i64> = (0..vb.len()).map(|i| vb.key(i).as_int().unwrap()).collect();
+    let visible: std::collections::HashSet<i64> =
+        (0..vb.len()).map(|i| vb.key(i).as_int().unwrap()).collect();
     for pk in 0..150 {
         assert_eq!(
             t.get(&Value::Int(pk), snap).is_some(),

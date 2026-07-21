@@ -19,7 +19,9 @@
 //! run would be checking for over a longer window.
 
 use chakradb::io::MemIo;
-use chakradb::{Clock, Durability, Metrics, RealClock, Rng, Row, Storage, StorageConfig, TableConfig};
+use chakradb::{
+    Clock, Durability, Metrics, RealClock, Rng, Row, Storage, StorageConfig, TableConfig,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -100,9 +102,10 @@ fn sustained_ingest_reaches_equilibrium() {
     // Compare the last tenth of the run against the first tenth: if compaction
     // keeps up, these are comparable. If it does not, the tail is far larger.
     let chunk = (parts_series.len() / 10).max(1);
-    let head_avg: f64 =
-        parts_series[..chunk].iter().sum::<usize>() as f64 / chunk as f64;
-    let tail_avg: f64 = parts_series[parts_series.len() - chunk..].iter().sum::<usize>() as f64
+    let head_avg: f64 = parts_series[..chunk].iter().sum::<usize>() as f64 / chunk as f64;
+    let tail_avg: f64 = parts_series[parts_series.len() - chunk..]
+        .iter()
+        .sum::<usize>() as f64
         / chunk as f64;
 
     let snap = s.database().snapshot();
@@ -113,8 +116,7 @@ fn sustained_ingest_reaches_equilibrium() {
         "M1-3 soak: {secs}s · {ops} ops · parts peak {peak} final {final_parts} \
          (head avg {head_avg:.1}, tail avg {tail_avg:.1}) · {live} live rows · \
          {} compactions · {} checkpoints-worth of WAL",
-        m.compactions,
-        m.seals,
+        m.compactions, m.seals,
     );
 
     // The invariant: part count plateaus rather than growing without bound.

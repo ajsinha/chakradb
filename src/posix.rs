@@ -300,10 +300,7 @@ mod tests {
     fn path_traversal_is_rejected() {
         let (_d, io) = io_at("traversal");
         for bad in ["../escape", "a/b", "..", ".", "", "sub\\file"] {
-            assert!(
-                io.open(bad).is_err(),
-                "accepted illegal file name {bad:?}"
-            );
+            assert!(io.open(bad).is_err(), "accepted illegal file name {bad:?}");
         }
     }
 

@@ -197,7 +197,7 @@ mod tests {
             base_delay: Duration::from_secs(10),
             max_delay: Duration::from_secs(60),
             stall_cap: Duration::from_millis(5),
-            });
+        });
         assert!(b.evaluate(100).delay() <= Duration::from_millis(5));
         assert!(b.evaluate(1).delay() <= Duration::from_millis(5));
     }

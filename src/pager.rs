@@ -107,7 +107,12 @@ impl PagedPart {
     }
 
     /// Wrap an already-resident part (the sealing path, which has the data).
-    pub fn resident(part: Arc<Part>, path: String, io: Arc<dyn Io>, metrics: Arc<PagerMetrics>) -> Self {
+    pub fn resident(
+        part: Arc<Part>,
+        path: String,
+        io: Arc<dyn Io>,
+        metrics: Arc<PagerMetrics>,
+    ) -> Self {
         let summary = PartSummary {
             id: part.id(),
             num_rows: part.num_rows(),
@@ -274,7 +279,11 @@ mod tests {
     #[test]
     fn in_range_lookup_faults_once() {
         let (_io, m, paged) = setup(&[10, 20, 30]);
-        assert!(paged.lookup(&k(20), Snapshot::at(100)).unwrap().ordinal().is_some());
+        assert!(paged
+            .lookup(&k(20), Snapshot::at(100))
+            .unwrap()
+            .ordinal()
+            .is_some());
         assert!(paged.is_resident());
         assert_eq!(m.parts_faulted.load(Ordering::Relaxed), 1);
         // Subsequent lookups reuse the loaded data.
@@ -353,7 +362,12 @@ mod tests {
             let path = format!("p{i}");
             persist::write_part(&*io, &path, &p).unwrap();
             let s = read_summary(&*io, &path).unwrap();
-            parts.push(PagedPart::register(s, path, io.clone() as Arc<dyn Io>, m.clone()));
+            parts.push(PagedPart::register(
+                s,
+                path,
+                io.clone() as Arc<dyn Io>,
+                m.clone(),
+            ));
         }
         assert_eq!(m.resident_fraction(), 0.0);
         parts[0].load().unwrap();

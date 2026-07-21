@@ -56,7 +56,10 @@ async fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/home/ashutosh/duckdb/hits.csv".to_string());
-    let runs: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(25);
+    let runs: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(25);
 
     let db = Arc::new(Database::new());
     let t0 = Instant::now();
@@ -79,8 +82,13 @@ async fn main() {
                 let mut rng = Rng::new(id + 100);
                 while !stop.load(Ordering::Relaxed) {
                     let pk = rng.range(0, n as i64);
-                    if t.upsert(Row::new(pk, rng.range(0, 1000), rng.next_f64() * 100.0, "w"))
-                        .is_ok()
+                    if t.upsert(Row::new(
+                        pk,
+                        rng.range(0, 1000),
+                        rng.next_f64() * 100.0,
+                        "w",
+                    ))
+                    .is_ok()
                     {
                         writes.fetch_add(1, Ordering::Relaxed);
                     }
@@ -95,9 +103,7 @@ async fn main() {
     ctx.register_table("hits", Arc::new(mem)).unwrap();
 
     println!("# ChakraDB + DataFusion — M3 spike");
-    println!(
-        "Loaded {n} rows from {path} in {load_ms:.0} ms. Median of {runs} runs, cold.\n"
-    );
+    println!("Loaded {n} rows from {path} in {load_ms:.0} ms. Median of {runs} runs, cold.\n");
 
     // ---- Part 2: the five Gate-2 queries, measured ----
     println!("## Analytics — measured (DataFusion executor over ChakraDB snapshot)\n");
@@ -105,9 +111,15 @@ async fn main() {
     println!("|---|---|---|");
     let queries = [
         ("COUNT(*)", "SELECT COUNT(*) FROM hits"),
-        ("SUM(a) WHERE a > 500", "SELECT SUM(a) FROM hits WHERE a > 500"),
+        (
+            "SUM(a) WHERE a > 500",
+            "SELECT SUM(a) FROM hits WHERE a > 500",
+        ),
         ("GROUP BY a", "SELECT a, COUNT(*) FROM hits GROUP BY a"),
-        ("ORDER BY b LIMIT 100", "SELECT pk FROM hits ORDER BY b DESC LIMIT 100"),
+        (
+            "ORDER BY b LIMIT 100",
+            "SELECT pk FROM hits ORDER BY b DESC LIMIT 100",
+        ),
         ("COUNT(DISTINCT a)", "SELECT COUNT(DISTINCT a) FROM hits"),
     ];
     for (label, sql) in queries {
@@ -160,8 +172,8 @@ async fn main() {
             Ok(_) => "runs".to_string(),
             Err(_) => "**rejected**".to_string(),
         };
-        let df_ok = ctx.sql(sql).await.is_ok()
-            && ctx.sql(sql).await.unwrap().collect().await.is_ok();
+        let df_ok =
+            ctx.sql(sql).await.is_ok() && ctx.sql(sql).await.unwrap().collect().await.is_ok();
         let df_result = if df_ok { "runs" } else { "error" };
         println!("| {label} | {interp_result} | {df_result} |");
     }

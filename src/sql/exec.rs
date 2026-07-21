@@ -8,10 +8,10 @@
 //! is to adopt DataFusion behind the existing `scan` boundary, not to hand-tune
 //! this.
 
+use super::backend::SqlBackend;
 use super::expr::{BinaryOp, Expr};
 use super::plan::{AggFn, OrderKey, Plan, Projection};
 use super::value::{batch_value, Value};
-use super::backend::SqlBackend;
 use crate::batch::Batch;
 use crate::error::Error;
 use crate::schema::Row;
@@ -148,8 +148,13 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     // Point-lookup fast path: `WHERE key = literal` with no grouping/aggregation
     // resolves through the index funnel (bounds → bloom → binary search) instead
     // of scanning — O(log n), the transactional read path.
-    if let Some(key) = point_lookup_key(&filter, &group_by, distinct, &projections, t.schema().key_index())
-    {
+    if let Some(key) = point_lookup_key(
+        &filter,
+        &group_by,
+        distinct,
+        &projections,
+        t.schema().key_index(),
+    ) {
         let columns: Vec<String> = projections
             .iter()
             .map(|p| match p {
@@ -183,8 +188,10 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     // own columns.
     let segments = t.scan_segments(snap);
 
-    let non_grouped =
-        group_by.is_empty() && projections.iter().all(|p| matches!(p, Projection::Expr(..)));
+    let non_grouped = group_by.is_empty()
+        && projections
+            .iter()
+            .all(|p| matches!(p, Projection::Expr(..)));
 
     // Non-grouped `ORDER BY` (without DISTINCT) sorts on keys evaluated from the
     // *source* row — so `ORDER BY b` is honoured even when `b` is not projected —
@@ -331,7 +338,12 @@ fn project_ordered(
             let key = if order_by.len() == 1 {
                 SortKey::One(OrdVal(order_by[0].expr.eval_at(batch, i)))
             } else {
-                SortKey::Many(order_by.iter().map(|o| OrdVal(o.expr.eval_at(batch, i))).collect())
+                SortKey::Many(
+                    order_by
+                        .iter()
+                        .map(|o| OrdVal(o.expr.eval_at(batch, i)))
+                        .collect(),
+                )
             };
             keyed.push((key, si, i));
         }
@@ -472,7 +484,11 @@ fn passes_at(filter: &Option<Expr>, batch: &Batch, i: usize) -> bool {
     }
 }
 
-fn project_rows(projections: &[Projection], segments: &[Segment], filter: &Option<Expr>) -> ResultSet {
+fn project_rows(
+    projections: &[Projection],
+    segments: &[Segment],
+    filter: &Option<Expr>,
+) -> ResultSet {
     let columns: Vec<String> = projections
         .iter()
         .map(|p| match p {
@@ -617,10 +633,20 @@ impl Acc {
             Value::Bool(_) => {}
             _ => self.all_int = false,
         }
-        if self.min.as_ref().map(|m| v.total_cmp(m).is_lt()).unwrap_or(true) {
+        if self
+            .min
+            .as_ref()
+            .map(|m| v.total_cmp(m).is_lt())
+            .unwrap_or(true)
+        {
             self.min = Some(v.clone());
         }
-        if self.max.as_ref().map(|m| v.total_cmp(m).is_gt()).unwrap_or(true) {
+        if self
+            .max
+            .as_ref()
+            .map(|m| v.total_cmp(m).is_gt())
+            .unwrap_or(true)
+        {
             self.max = Some(v.clone());
         }
     }
@@ -682,7 +708,9 @@ fn aggregate_rows(
             entry.0 += 1;
             for (i, p) in projections.iter().enumerate() {
                 if let Projection::Agg(_, arg, _) = p {
-                    let v = arg.map(|c| batch_value(batch, c, row_i)).unwrap_or(Value::Int(1));
+                    let v = arg
+                        .map(|c| batch_value(batch, c, row_i))
+                        .unwrap_or(Value::Int(1));
                     entry.1[i].push(&v);
                 }
             }
@@ -690,7 +718,10 @@ fn aggregate_rows(
     }
     // A bare aggregate with no rows still yields one row (COUNT = 0).
     if groups.is_empty() && group_by.is_empty() {
-        groups.insert(GroupKey::Many(Vec::new()), (0, vec![Acc::new(); projections.len()]));
+        groups.insert(
+            GroupKey::Many(Vec::new()),
+            (0, vec![Acc::new(); projections.len()]),
+        );
     }
 
     let columns: Vec<String> = projections
@@ -788,7 +819,10 @@ mod tests {
     fn insert_and_count() {
         let db = Database::new();
         run(&db, "CREATE TABLE t (pk INT)");
-        assert_eq!(run(&db, "INSERT INTO t VALUES (1,2,3,'a')"), Outcome::Affected(1));
+        assert_eq!(
+            run(&db, "INSERT INTO t VALUES (1,2,3,'a')"),
+            Outcome::Affected(1)
+        );
         match run(&db, "SELECT COUNT(*) FROM t") {
             Outcome::Rows { rows, .. } => assert_eq!(rows[0][0], "1"),
             _ => panic!(),
@@ -824,7 +858,10 @@ mod tests {
     #[test]
     fn aggregates() {
         let db = db_with(&[(1, 10, 1.0, "x"), (2, 20, 2.0, "y"), (3, 30, 3.0, "z")]);
-        match run(&db, "SELECT COUNT(*), SUM(a), MIN(a), MAX(a), AVG(a) FROM t") {
+        match run(
+            &db,
+            "SELECT COUNT(*), SUM(a), MIN(a), MAX(a), AVG(a) FROM t",
+        ) {
             Outcome::Rows { rows, .. } => {
                 assert_eq!(rows[0][0], "3");
                 assert_eq!(rows[0][1], "60");
@@ -876,7 +913,10 @@ mod tests {
     #[test]
     fn update_with_predicate() {
         let db = db_with(&[(1, 10, 0.0, "a"), (2, 20, 0.0, "b")]);
-        assert_eq!(run(&db, "UPDATE t SET a = 99 WHERE pk = 1"), Outcome::Affected(1));
+        assert_eq!(
+            run(&db, "UPDATE t SET a = 99 WHERE pk = 1"),
+            Outcome::Affected(1)
+        );
         match run(&db, "SELECT a FROM t WHERE pk = 1") {
             Outcome::Rows { rows, .. } => assert_eq!(rows[0][0], "99"),
             _ => panic!(),

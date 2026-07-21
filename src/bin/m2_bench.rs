@@ -39,8 +39,13 @@ fn seed(db: &Arc<Database>, rows: i64) {
     let t = db.create_table("hits").unwrap();
     let mut rng = Rng::new(1);
     for pk in 0..rows {
-        t.insert(Row::new(pk, rng.range(0, 1000), rng.next_f64() * 100.0, "x"))
-            .unwrap();
+        t.insert(Row::new(
+            pk,
+            rng.range(0, 1000),
+            rng.next_f64() * 100.0,
+            "x",
+        ))
+        .unwrap();
     }
 }
 
@@ -90,7 +95,14 @@ fn nfr03(out: &mut String) {
                 let mut rng = Rng::new(id + 10);
                 while !stop.load(Ordering::Relaxed) {
                     let pk = rng.range(0, ROWS);
-                    if t.upsert(Row::new(pk, rng.range(0, 1000), rng.next_f64() * 100.0, "y")).is_ok() {
+                    if t.upsert(Row::new(
+                        pk,
+                        rng.range(0, 1000),
+                        rng.next_f64() * 100.0,
+                        "y",
+                    ))
+                    .is_ok()
+                    {
                         writes.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -141,9 +153,15 @@ fn sql_throughput(out: &mut String) {
     let engine = SqlEngine::new(db);
     let queries = [
         ("COUNT(*)", "SELECT COUNT(*) FROM hits"),
-        ("filtered aggregate", "SELECT SUM(a) FROM hits WHERE a > 500"),
+        (
+            "filtered aggregate",
+            "SELECT SUM(a) FROM hits WHERE a > 500",
+        ),
         ("group by", "SELECT a, COUNT(*) FROM hits GROUP BY a"),
-        ("order + limit", "SELECT pk FROM hits ORDER BY b DESC LIMIT 100"),
+        (
+            "order + limit",
+            "SELECT pk FROM hits ORDER BY b DESC LIMIT 100",
+        ),
         ("distinct", "SELECT DISTINCT a FROM hits"),
     ];
     for (label, sql) in queries {

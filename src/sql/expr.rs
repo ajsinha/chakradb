@@ -77,9 +77,7 @@ impl Expr {
         match self {
             Expr::Column(c) => batch_value(batch, *c, i),
             Expr::Literal(v) => v.clone(),
-            Expr::IsNull(e, negated) => {
-                Value::Bool(e.eval_at(batch, i).is_null() != *negated)
-            }
+            Expr::IsNull(e, negated) => Value::Bool(e.eval_at(batch, i).is_null() != *negated),
             Expr::Unary(op, e) => eval_unary(*op, e.eval_at(batch, i)),
             Expr::Binary(op, l, r) => match op {
                 BinaryOp::And => eval_and(l.eval_at(batch, i), r.eval_at(batch, i)),
@@ -283,16 +281,25 @@ mod tests {
 
     #[test]
     fn comparison_operators() {
-        assert!(Expr::Binary(BinaryOp::Lt, lit_i(1), lit_i(2)).eval(&row()).is_true());
-        assert!(Expr::Binary(BinaryOp::GtEq, lit_i(2), lit_i(2)).eval(&row()).is_true());
-        assert!(!Expr::Binary(BinaryOp::Gt, lit_i(1), lit_i(2)).eval(&row()).is_true());
+        assert!(Expr::Binary(BinaryOp::Lt, lit_i(1), lit_i(2))
+            .eval(&row())
+            .is_true());
+        assert!(Expr::Binary(BinaryOp::GtEq, lit_i(2), lit_i(2))
+            .eval(&row())
+            .is_true());
+        assert!(!Expr::Binary(BinaryOp::Gt, lit_i(1), lit_i(2))
+            .eval(&row())
+            .is_true());
     }
 
     #[test]
     fn is_null_never_returns_null() {
         assert!(Expr::IsNull(null(), false).eval(&row()).is_true());
         assert!(!Expr::IsNull(lit_i(1), false).eval(&row()).is_true());
-        assert!(Expr::IsNull(lit_i(1), true).eval(&row()).is_true(), "IS NOT NULL");
+        assert!(
+            Expr::IsNull(lit_i(1), true).eval(&row()).is_true(),
+            "IS NOT NULL"
+        );
     }
 
     #[test]
@@ -302,13 +309,19 @@ mod tests {
         assert!(Expr::Binary(BinaryOp::And, t(), t()).eval(&row()).is_true());
         assert!(!Expr::Binary(BinaryOp::And, t(), f()).eval(&row()).is_true());
         // false AND NULL = false (short-circuit through UNKNOWN)
-        assert!(!Expr::Binary(BinaryOp::And, f(), null()).eval(&row()).is_true());
+        assert!(!Expr::Binary(BinaryOp::And, f(), null())
+            .eval(&row())
+            .is_true());
         assert_eq!(
-            Expr::Binary(BinaryOp::And, f(), null()).eval(&row()).render(),
+            Expr::Binary(BinaryOp::And, f(), null())
+                .eval(&row())
+                .render(),
             "0"
         );
         // true AND NULL = NULL
-        assert!(Expr::Binary(BinaryOp::And, t(), null()).eval(&row()).is_null());
+        assert!(Expr::Binary(BinaryOp::And, t(), null())
+            .eval(&row())
+            .is_null());
     }
 
     #[test]
@@ -318,14 +331,21 @@ mod tests {
         assert!(Expr::Binary(BinaryOp::Or, f(), t()).eval(&row()).is_true());
         assert!(!Expr::Binary(BinaryOp::Or, f(), f()).eval(&row()).is_true());
         // true OR NULL = true
-        assert!(Expr::Binary(BinaryOp::Or, t(), null()).eval(&row()).is_true());
+        assert!(Expr::Binary(BinaryOp::Or, t(), null())
+            .eval(&row())
+            .is_true());
         // false OR NULL = NULL
-        assert!(Expr::Binary(BinaryOp::Or, f(), null()).eval(&row()).is_null());
+        assert!(Expr::Binary(BinaryOp::Or, f(), null())
+            .eval(&row())
+            .is_null());
     }
 
     #[test]
     fn negation() {
-        assert_eq!(Expr::Unary(UnaryOp::Neg, lit_i(5)).eval(&row()).render(), "-5");
+        assert_eq!(
+            Expr::Unary(UnaryOp::Neg, lit_i(5)).eval(&row()).render(),
+            "-5"
+        );
         let not_t = Expr::Unary(UnaryOp::Not, Box::new(Expr::Literal(Value::Bool(true))));
         assert!(!not_t.eval(&row()).is_true());
         // NOT NULL (value) is NULL

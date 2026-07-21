@@ -113,8 +113,7 @@ pub fn is_query(sql: &str) -> bool {
 
 fn plan_with(sql: &str, schema_for: SchemaFor) -> Result<Plan, String> {
     let dialect = PostgreSqlDialect {};
-    let mut stmts =
-        Parser::parse_sql(&dialect, sql).map_err(|e| format!("parse error: {e}"))?;
+    let mut stmts = Parser::parse_sql(&dialect, sql).map_err(|e| format!("parse error: {e}"))?;
     if stmts.len() != 1 {
         return Err(format!("expected one statement, got {}", stmts.len()));
     }
@@ -199,8 +198,7 @@ fn table_from_factor(tf: &sa::TableFactor) -> Result<String, String> {
 }
 
 fn plan_insert(ins: sa::Insert, schema_for: SchemaFor) -> Result<Plan, String> {
-    let table = table_name_of(&ins.table)
-        .ok_or("INSERT target is not a plain table name")?;
+    let table = table_name_of(&ins.table).ok_or("INSERT target is not a plain table name")?;
     let schema = need_schema(schema_for, &table)?;
     let source = ins.source.ok_or("INSERT without VALUES")?;
     let values = match *source.body {
@@ -314,8 +312,10 @@ fn plan_query(q: sa::Query, schema_for: SchemaFor) -> Result<Plan, String> {
             Err(w) if w == "__wildcard__" => {
                 // Expand `*` to every user column (a synthesised rowid stays hidden).
                 for i in schema.star_indices() {
-                    projections
-                        .push(Projection::Expr(Expr::Column(i), schema.column(i).name.clone()));
+                    projections.push(Projection::Expr(
+                        Expr::Column(i),
+                        schema.column(i).name.clone(),
+                    ));
                 }
             }
             Err(e) => return Err(e),
@@ -394,9 +394,11 @@ fn try_aggregate(e: &sa::Expr, schema: &Schema) -> Result<Option<(AggFn, Option<
     }
     let arg = match &args[0] {
         sa::FunctionArg::Unnamed(sa::FunctionArgExpr::Wildcard) => None,
-        sa::FunctionArg::Unnamed(sa::FunctionArgExpr::Expr(sa::Expr::Identifier(id))) => {
-            Some(schema.column_index(&id.value).ok_or_else(|| format!("no such column: {id}"))?)
-        }
+        sa::FunctionArg::Unnamed(sa::FunctionArgExpr::Expr(sa::Expr::Identifier(id))) => Some(
+            schema
+                .column_index(&id.value)
+                .ok_or_else(|| format!("no such column: {id}"))?,
+        ),
         other => return Err(format!("unsupported aggregate argument: {other:?}")),
     };
     Ok(Some((agg, arg)))
@@ -422,9 +424,7 @@ fn plan_order_by(ob: &Option<sa::OrderBy>, schema: &Schema) -> Result<Vec<OrderK
 fn plan_limit(limit: &Option<sa::LimitClause>) -> Result<Option<usize>, String> {
     match limit {
         None => Ok(None),
-        Some(sa::LimitClause::LimitOffset { limit: Some(e), .. }) => {
-            Ok(Some(as_usize(e)?))
-        }
+        Some(sa::LimitClause::LimitOffset { limit: Some(e), .. }) => Ok(Some(as_usize(e)?)),
         Some(sa::LimitClause::LimitOffset { limit: None, .. }) => Ok(None),
         Some(other) => Err(format!("unsupported LIMIT: {other:?}")),
     }
@@ -536,4 +536,3 @@ fn as_usize(e: &sa::Expr) -> Result<usize, String> {
         _ => Err("expected a non-negative integer".into()),
     }
 }
-

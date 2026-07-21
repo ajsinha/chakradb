@@ -10,7 +10,7 @@
 //! Seeds make every failure reproducible.
 
 use chakradb::io::{Io, MemIo};
-use chakradb::{Database, Durability, Row, Rng, Storage, StorageConfig, Value};
+use chakradb::{Database, Durability, Rng, Row, Storage, StorageConfig, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -263,10 +263,20 @@ fn torn_wal_tail_never_corrupts_the_prefix() {
         let snap = s2.database().snapshot();
         // Whatever survived must be a *prefix* of the workload, intact.
         let n = t.row_count(snap);
-        assert!(n <= 40, "cut {cut} recovered {n} rows, more than were written");
-        assert_eq!(t.scan(snap).len(), n, "cut {cut} produced inconsistent state");
+        assert!(
+            n <= 40,
+            "cut {cut} recovered {n} rows, more than were written"
+        );
+        assert_eq!(
+            t.scan(snap).len(),
+            n,
+            "cut {cut} produced inconsistent state"
+        );
         for pk in 0..n as i64 {
-            assert!(t.get(&Value::Int(pk), snap).is_some(), "cut {cut} lost pk={pk} from prefix");
+            assert!(
+                t.get(&Value::Int(pk), snap).is_some(),
+                "cut {cut} lost pk={pk} from prefix"
+            );
         }
     }
 }
@@ -342,6 +352,10 @@ fn snapshot_isolation_holds_after_recovery() {
 
     let before = db.snapshot();
     s2.update("t", row(1, "third")).unwrap();
-    assert_eq!(t.get(&Value::Int(1), before).unwrap().c(), "second", "recovered snapshot moved");
+    assert_eq!(
+        t.get(&Value::Int(1), before).unwrap().c(),
+        "second",
+        "recovered snapshot moved"
+    );
     assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "third");
 }

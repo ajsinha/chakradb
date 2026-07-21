@@ -66,6 +66,8 @@ pub mod codec;
 pub mod compaction;
 pub mod csn;
 pub mod database;
+#[cfg(feature = "datafusion")]
+pub mod datafusion_bridge;
 pub mod delete_vector;
 pub mod durability;
 pub mod error;
@@ -75,11 +77,9 @@ pub mod manifest;
 pub mod metrics;
 pub mod pager;
 pub mod part;
+pub mod persist;
 #[cfg(unix)]
 pub mod posix;
-pub mod persist;
-#[cfg(feature = "datafusion")]
-pub mod datafusion_bridge;
 pub mod rng;
 pub mod schema;
 pub mod sql;
@@ -90,21 +90,21 @@ pub mod value;
 pub mod wal;
 
 pub use backpressure::{Backpressure, BackpressureConfig};
+pub use batch::Batch;
 pub use clock::{Clock, RealClock, SimClock};
-pub use durability::Durability;
 pub use csn::{Csn, CsnGenerator, Snapshot};
 pub use database::Database;
+pub use durability::Durability;
 pub use error::{Error, Result};
 pub use metrics::{Metrics, MetricsSnapshot};
 #[cfg(unix)]
 pub use posix::{PosixIo, TempDir};
 pub use rng::Rng;
-pub use batch::Batch;
 pub use schema::{ColumnDef, Row, Schema};
 pub use sql::SqlEngine;
-pub use value::{DataType, Key, Value};
 pub use storage::{Storage, StorageConfig};
 pub use table::{Table, TableConfig, TableStats};
+pub use value::{DataType, Key, Value};
 
 /// Crate version, for benchmark reports.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

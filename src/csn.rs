@@ -163,7 +163,10 @@ mod tests {
                 .iter()
                 .filter(|v| **v)
                 .count();
-            assert_eq!(visible, 1, "at csn={csn} exactly one version must be visible");
+            assert_eq!(
+                visible, 1,
+                "at csn={csn} exactly one version must be visible"
+            );
         }
     }
 
@@ -235,7 +238,10 @@ mod tests {
                 thread::spawn(move || (0..1000).map(|_| g.allocate()).collect::<Vec<_>>())
             })
             .collect();
-        let mut all: Vec<Csn> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        let mut all: Vec<Csn> = threads
+            .into_iter()
+            .flat_map(|t| t.join().unwrap())
+            .collect();
         all.sort_unstable();
         let before = all.len();
         all.dedup();

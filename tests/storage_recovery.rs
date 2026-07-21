@@ -172,7 +172,12 @@ fn multiple_tables_recover_independently() {
     assert_eq!(s2.database().table("a").unwrap().row_count(snap), 10);
     assert_eq!(s2.database().table("b").unwrap().row_count(snap), 5);
     assert_eq!(
-        s2.database().table("a").unwrap().get_latest(&Value::Int(0)).unwrap().c(),
+        s2.database()
+            .table("a")
+            .unwrap()
+            .get_latest(&Value::Int(0))
+            .unwrap()
+            .c(),
         "in-a"
     );
 }
@@ -233,5 +238,9 @@ fn compaction_result_survives_checkpoint() {
     let s2 = open(io);
     let t = s2.database().table("t").unwrap();
     assert_eq!(t.row_count(s2.database().snapshot()), 150);
-    assert_eq!(s2.recovery().rows_from_parts, 150, "reclaimed rows returned");
+    assert_eq!(
+        s2.recovery().rows_from_parts,
+        150,
+        "reclaimed rows returned"
+    );
 }

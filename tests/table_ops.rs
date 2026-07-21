@@ -47,7 +47,10 @@ fn delete_hides_row_and_is_not_repeatable() {
     t.insert(row(1)).unwrap();
     t.delete(&Value::Int(1)).unwrap();
     assert_eq!(t.get_latest(&Value::Int(1)), None);
-    assert!(matches!(t.delete(&Value::Int(1)), Err(Error::KeyNotFound(_))));
+    assert!(matches!(
+        t.delete(&Value::Int(1)),
+        Err(Error::KeyNotFound(_))
+    ));
 }
 
 #[test]

@@ -48,7 +48,9 @@ pub enum WalRecord {
     },
     /// All state up to `csn` is durable in parts; the log before this record
     /// is reclaimable.
-    Checkpoint { csn: Csn },
+    Checkpoint {
+        csn: Csn,
+    },
 }
 
 impl WalRecord {

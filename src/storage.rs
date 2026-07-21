@@ -7,7 +7,6 @@
 //! manifest (FR-06a), and are faulted in lazily on open (FR-06b, see `pager`).
 
 use crate::backpressure::Backpressure;
-pub use crate::storage_config::{RecoveryReport, StorageConfig};
 use crate::clock::RealClock;
 use crate::csn::Csn;
 use crate::database::Database;
@@ -17,6 +16,7 @@ use crate::io::Io;
 use crate::manifest::{Manifest, ManifestState, TableMeta};
 use crate::metrics::Metrics;
 use crate::pager::{PagedPart, PagerMetrics, PartSummary};
+pub use crate::storage_config::{RecoveryReport, StorageConfig};
 
 /// A table's parts registered lazily at open: (name, next part id, parts).
 type PendingParts = Vec<(String, u64, Vec<Arc<PagedPart>>)>;
@@ -232,7 +232,8 @@ impl Storage {
     }
 
     /// Fault every registered part in and install it on its table.
-    pub fn warm(&self) {  // idempotent via OnceLock
+    pub fn warm(&self) {
+        // idempotent via OnceLock
         self.warmed.get_or_init(|| {
             let pending = std::mem::take(&mut *self.pending_parts.lock().unwrap());
             for (name, next_id, lazy) in pending {
@@ -334,7 +335,11 @@ impl Storage {
         for row in rows {
             let csn = t.replay_insert_new(row.clone());
             self.wal
-                .append_async(&WalRecord::Insert { table: id, csn, row })
+                .append_async(&WalRecord::Insert {
+                    table: id,
+                    csn,
+                    row,
+                })
                 .map_err(|_| Error::WriteConflict)?;
         }
         self.wal.flush().map_err(|_| Error::WriteConflict)?;
@@ -465,7 +470,11 @@ impl Storage {
 
         // Phase 3: drop files for parts no longer live (compacted away). Errors
         // here waste space but are not correctness problems.
-        let dead: Vec<(u32, u64)> = persisted.keys().copied().filter(|k| !live.contains(k)).collect();
+        let dead: Vec<(u32, u64)> = persisted
+            .keys()
+            .copied()
+            .filter(|k| !live.contains(k))
+            .collect();
         for (tid, pid) in dead {
             let _ = self.io.remove(&part_path(tid, pid));
             persisted.remove(&(tid, pid));

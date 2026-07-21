@@ -258,7 +258,10 @@ mod tests {
         assert!(!Value::Text("x".into()).fits(DataType::Int));
         assert!(Value::Null.fits(DataType::Bool));
 
-        assert_eq!(Value::Int(3).coerce(DataType::Float), Some(Value::Float(3.0)));
+        assert_eq!(
+            Value::Int(3).coerce(DataType::Float),
+            Some(Value::Float(3.0))
+        );
         assert_eq!(Value::Text("x".into()).coerce(DataType::Int), None);
     }
 

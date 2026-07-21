@@ -351,7 +351,10 @@ mod tests {
         b.insert(Row::new(7, 0, 0.0, "old"), 10);
         let sealed = b.seal();
         assert_eq!(sealed.created, vec![10, 30]);
-        assert_eq!(texts(&sealed.batch), vec!["old".to_string(), "new".to_string()]);
+        assert_eq!(
+            texts(&sealed.batch),
+            vec!["old".to_string(), "new".to_string()]
+        );
     }
 
     #[test]

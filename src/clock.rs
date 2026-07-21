@@ -197,7 +197,8 @@ mod tests {
 
     #[test]
     fn clock_trait_is_object_safe() {
-        let clocks: Vec<Box<dyn Clock>> = vec![Box::new(RealClock::new()), Box::new(SimClock::new())];
+        let clocks: Vec<Box<dyn Clock>> =
+            vec![Box::new(RealClock::new()), Box::new(SimClock::new())];
         for c in &clocks {
             let _ = c.now_millis();
         }

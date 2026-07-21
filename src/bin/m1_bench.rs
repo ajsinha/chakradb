@@ -129,7 +129,8 @@ fn fr06b_lazy_open(out: &mut String) {
         {
             let s = Storage::open(io.clone(), cfg(Durability::Group, 25_000)).unwrap();
             s.create_table("t").unwrap();
-            s.load_batch("t", (0..n).map(|pk| row(pk, "v")).collect()).unwrap();
+            s.load_batch("t", (0..n).map(|pk| row(pk, "v")).collect())
+                .unwrap();
             s.checkpoint().unwrap();
         }
         let t0 = clock.now_nanos();
@@ -140,7 +141,9 @@ fn fr06b_lazy_open(out: &mut String) {
             n,
             ns as f64 / 1e6,
             s2.recovery().parts_loaded,
-            s2.pager_metrics().bytes_faulted.load(std::sync::atomic::Ordering::Relaxed),
+            s2.pager_metrics()
+                .bytes_faulted
+                .load(std::sync::atomic::Ordering::Relaxed),
         ));
     }
     out.push_str("\nColumn bytes at open should be **0** at every size — that is FR-06b. Open time rises only with part *count* (O(parts) summary frames), the honest residual.\n");
@@ -178,7 +181,11 @@ fn m1_5_durability_latency(out: &mut String) {
             d.pct(0.99) as f64 / 1000.0,
             d.pct(0.999) as f64 / 1000.0,
             s.wal().syncs_per_append(),
-            if mode.may_lose_data() { "**yes**" } else { "no" },
+            if mode.may_lose_data() {
+                "**yes**"
+            } else {
+                "no"
+            },
         ));
     }
     out.push_str(
@@ -253,7 +260,9 @@ fn m1_5_under_scan_load(out: &mut String) {
             scans.load(Ordering::Relaxed),
         ));
     }
-    out.push_str("\nThe p999/max columns show whether scan traffic introduces write-path tail latency.\n");
+    out.push_str(
+        "\nThe p999/max columns show whether scan traffic introduces write-path tail latency.\n",
+    );
 }
 
 fn m1_5_group_commit_scaling(out: &mut String) {
@@ -412,7 +421,6 @@ fn m0_defect_recheck(out: &mut String) {
     }
     out.push_str("\nThe two rows should now be within the same order of magnitude.\n");
 }
-
 
 // ------------------------------------------------------------------ M1-3
 

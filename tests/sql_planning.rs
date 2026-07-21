@@ -57,9 +57,7 @@ fn select_star() {
 fn select_with_filter_and_limit() {
     let p = plan("SELECT pk FROM t WHERE a > 5 LIMIT 10").unwrap();
     match p {
-        Plan::Select {
-            filter, limit, ..
-        } => {
+        Plan::Select { filter, limit, .. } => {
             assert!(filter.is_some());
             assert_eq!(limit, Some(10));
         }
@@ -84,8 +82,14 @@ fn select_aggregate() {
     let p = plan("SELECT COUNT(*), SUM(a) FROM t").unwrap();
     match p {
         Plan::Select { projections, .. } => {
-            assert!(matches!(projections[0], Projection::Agg(AggFn::Count, None, _)));
-            assert!(matches!(projections[1], Projection::Agg(AggFn::Sum, Some(1), _)));
+            assert!(matches!(
+                projections[0],
+                Projection::Agg(AggFn::Count, None, _)
+            ));
+            assert!(matches!(
+                projections[1],
+                Projection::Agg(AggFn::Sum, Some(1), _)
+            ));
         }
         _ => panic!(),
     }
@@ -103,7 +107,13 @@ fn select_group_by() {
 #[test]
 fn delete_with_filter() {
     let p = plan("DELETE FROM t WHERE pk = 5").unwrap();
-    assert!(matches!(p, Plan::Delete { filter: Some(_), .. }));
+    assert!(matches!(
+        p,
+        Plan::Delete {
+            filter: Some(_),
+            ..
+        }
+    ));
 }
 
 #[test]

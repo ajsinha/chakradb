@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 fn engine_with(seed: u64, n: i64) -> SqlEngine {
     let e = SqlEngine::new(Arc::new(Database::new()));
-    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
+    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)")
+        .unwrap();
     let mut rng = Rng::new(seed);
     for pk in 0..n {
         // Some columns randomly held back so NULLs and edge values appear.
@@ -48,8 +49,8 @@ fn predicates() -> Vec<&'static str> {
         "a <> 5",
         "pk % 2 = 0",
         "a > 0 OR pk < 5",
-        "a = NULL",       // always NULL → no rows
-        "a IS NULL",      // never, our schema has no NULL a
+        "a = NULL",  // always NULL → no rows
+        "a IS NULL", // never, our schema has no NULL a
         "c = 's3'",
         "NOT (a > 0)",
         "a > 0 AND a > 0",
@@ -104,7 +105,10 @@ fn double_negation_is_identity_modulo_nulls() {
         for p in predicates() {
             let once = count(&e, &format!("SELECT COUNT(*) FROM t WHERE {p}"));
             let twice = count(&e, &format!("SELECT COUNT(*) FROM t WHERE NOT (NOT ({p}))"));
-            assert_eq!(once, twice, "seed {seed}: `{p}` not stable under double negation");
+            assert_eq!(
+                once, twice,
+                "seed {seed}: `{p}` not stable under double negation"
+            );
         }
     }
 }
@@ -142,7 +146,10 @@ fn distinct_count_never_exceeds_total() {
         let e = engine_with(seed, 100);
         let total = count(&e, "SELECT COUNT(*) FROM t");
         let distinct = e.query("SELECT DISTINCT a FROM t").unwrap().len() as i64;
-        assert!(distinct <= total, "seed {seed}: distinct {distinct} > total {total}");
+        assert!(
+            distinct <= total,
+            "seed {seed}: distinct {distinct} > total {total}"
+        );
         assert!(distinct >= 1 || total == 0);
     }
 }
@@ -155,6 +162,10 @@ fn deletes_reduce_count_by_exactly_the_matched_rows() {
         let matched = count(&e, "SELECT COUNT(*) FROM t WHERE a > 0");
         e.run("DELETE FROM t WHERE a > 0").unwrap();
         let after = count(&e, "SELECT COUNT(*) FROM t");
-        assert_eq!(before - matched, after, "seed {seed}: delete arithmetic wrong");
+        assert_eq!(
+            before - matched,
+            after,
+            "seed {seed}: delete arithmetic wrong"
+        );
     }
 }

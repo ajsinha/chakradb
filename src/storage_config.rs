@@ -40,4 +40,3 @@ pub struct RecoveryReport {
     /// Parts registered from their summaries without reading column data.
     pub parts_registered_lazily: usize,
 }
-

@@ -110,8 +110,7 @@ fn run_script(script: &str) {
                 let rows = engine
                     .query(&sql)
                     .unwrap_or_else(|e| panic!("record {i}: `{sql}`: {e}"));
-                let mut got: Vec<String> =
-                    rows.iter().map(|r| r.join(" ")).collect();
+                let mut got: Vec<String> = rows.iter().map(|r| r.join(" ")).collect();
                 let mut want = expected.clone();
                 if sort {
                     got.sort();

@@ -24,7 +24,10 @@ fn ordinal_equals_row_offset() {
     let p = part_of(&pks, 1);
     let snap = Snapshot::at(100);
     for (expected, &pk) in pks.iter().enumerate() {
-        let ord = p.lookup(&Value::Int(pk), snap).ordinal().expect("must be found");
+        let ord = p
+            .lookup(&Value::Int(pk), snap)
+            .ordinal()
+            .expect("must be found");
         assert_eq!(ord as usize, expected);
         assert_eq!(p.batch().key(ord as usize), Value::Int(pk));
     }
@@ -33,7 +36,10 @@ fn ordinal_equals_row_offset() {
 #[test]
 fn empty_part_rejects_everything() {
     let p = part_of(&[], 1);
-    assert_eq!(p.lookup(&Value::Int(5), Snapshot::at(10)), LookupResult::OutOfBounds);
+    assert_eq!(
+        p.lookup(&Value::Int(5), Snapshot::at(10)),
+        LookupResult::OutOfBounds
+    );
     assert_eq!(p.num_rows(), 0);
 }
 
@@ -59,16 +65,28 @@ fn funnel_rejects_absent_keys_within_bounds() {
 #[test]
 fn lookup_respects_creation_csn() {
     let p = part_of(&[1, 2, 3], 50);
-    assert_eq!(p.lookup(&Value::Int(2), Snapshot::at(49)), LookupResult::NotVisible);
-    assert_eq!(p.lookup(&Value::Int(2), Snapshot::at(50)), LookupResult::Found(1));
+    assert_eq!(
+        p.lookup(&Value::Int(2), Snapshot::at(49)),
+        LookupResult::NotVisible
+    );
+    assert_eq!(
+        p.lookup(&Value::Int(2), Snapshot::at(50)),
+        LookupResult::Found(1)
+    );
 }
 
 #[test]
 fn lookup_respects_deletion() {
     let p = part_of(&[1, 2, 3], 10);
     assert!(p.mark_deleted(1, 20));
-    assert_eq!(p.lookup(&Value::Int(2), Snapshot::at(19)), LookupResult::Found(1));
-    assert_eq!(p.lookup(&Value::Int(2), Snapshot::at(20)), LookupResult::NotVisible);
+    assert_eq!(
+        p.lookup(&Value::Int(2), Snapshot::at(19)),
+        LookupResult::Found(1)
+    );
+    assert_eq!(
+        p.lookup(&Value::Int(2), Snapshot::at(20)),
+        LookupResult::NotVisible
+    );
     assert!(!p.mark_deleted(1, 21), "double delete must be rejected");
 }
 
@@ -78,10 +96,20 @@ fn scan_filters_deleted_rows() {
     p.mark_deleted(1, 10);
     p.mark_deleted(3, 10);
     let b = p.scan(Snapshot::at(10));
-    assert_eq!((0..b.len()).map(|i| b.key(i).as_int().unwrap()).collect::<Vec<_>>(), vec![1, 3]);
+    assert_eq!(
+        (0..b.len())
+            .map(|i| b.key(i).as_int().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
     // An older snapshot still sees them all.
     let b9 = p.scan(Snapshot::at(9));
-    assert_eq!((0..b9.len()).map(|i| b9.key(i).as_int().unwrap()).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    assert_eq!(
+        (0..b9.len())
+            .map(|i| b9.key(i).as_int().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
 }
 
 #[test]
@@ -132,9 +160,15 @@ fn duplicate_keys_resolve_to_the_visible_version() {
     .collect();
     let p = Part::with_deletions(1, batch, CreatedCsns::PerRow(vec![10, 20, 10]), &[(0, 20)]);
 
-    let old = p.lookup(&Value::Int(5), Snapshot::at(15)).ordinal().unwrap();
+    let old = p
+        .lookup(&Value::Int(5), Snapshot::at(15))
+        .ordinal()
+        .unwrap();
     assert_eq!(p.batch().value(3, old as usize).render(), "old");
-    let new = p.lookup(&Value::Int(5), Snapshot::at(25)).ordinal().unwrap();
+    let new = p
+        .lookup(&Value::Int(5), Snapshot::at(25))
+        .ordinal()
+        .unwrap();
     assert_eq!(p.batch().value(3, new as usize).render(), "new");
 }
 
@@ -184,9 +218,15 @@ fn large_part_lookups_are_all_correct() {
     let p = part_of(&pks, 1);
     let snap = Snapshot::at(10);
     for &pk in pks.iter().step_by(97) {
-        assert!(p.lookup(&Value::Int(pk), snap).ordinal().is_some(), "missing {pk}");
+        assert!(
+            p.lookup(&Value::Int(pk), snap).ordinal().is_some(),
+            "missing {pk}"
+        );
     }
     for pk in (1..1000).step_by(3) {
-        assert!(p.lookup(&Value::Int(pk), snap).ordinal().is_none(), "phantom {pk}");
+        assert!(
+            p.lookup(&Value::Int(pk), snap).ordinal().is_none(),
+            "phantom {pk}"
+        );
     }
 }

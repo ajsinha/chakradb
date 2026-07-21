@@ -108,8 +108,15 @@ fn per_table_configuration_is_respected() {
         eager.insert(row(pk, "x")).unwrap();
         lazy.insert(row(pk, "x")).unwrap();
     }
-    assert!(eager.stats().num_parts > 0, "eager table should have sealed");
-    assert_eq!(lazy.stats().num_parts, 0, "lazy table should not have sealed");
+    assert!(
+        eager.stats().num_parts > 0,
+        "eager table should have sealed"
+    );
+    assert_eq!(
+        lazy.stats().num_parts,
+        0,
+        "lazy table should not have sealed"
+    );
 }
 
 #[test]
@@ -118,7 +125,10 @@ fn catalog_errors_are_typed() {
     db.create_table("t").unwrap();
     assert!(matches!(db.create_table("t"), Err(Error::TableExists(_))));
     assert!(matches!(db.table("missing"), Err(Error::TableNotFound(_))));
-    assert!(matches!(db.drop_table("missing"), Err(Error::TableNotFound(_))));
+    assert!(matches!(
+        db.drop_table("missing"),
+        Err(Error::TableNotFound(_))
+    ));
 }
 
 #[test]

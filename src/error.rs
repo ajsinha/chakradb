@@ -82,7 +82,13 @@ mod tests {
 
     #[test]
     fn equality_works_for_assertions() {
-        assert_eq!(Error::KeyNotFound("5".into()), Error::KeyNotFound("5".into()));
-        assert_ne!(Error::KeyNotFound("5".into()), Error::KeyNotFound("6".into()));
+        assert_eq!(
+            Error::KeyNotFound("5".into()),
+            Error::KeyNotFound("5".into())
+        );
+        assert_ne!(
+            Error::KeyNotFound("5".into()),
+            Error::KeyNotFound("6".into())
+        );
     }
 }

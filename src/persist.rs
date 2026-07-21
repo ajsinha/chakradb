@@ -81,8 +81,8 @@ pub fn read_part_summary(io: &dyn Io, path: &str) -> io::Result<crate::pager::Pa
     let len = u32::from_le_bytes(head[0..4].try_into().unwrap()) as usize;
     let mut buf = vec![0u8; 8 + len];
     f.pread(0, &mut buf)?;
-    let (payload, _) = unframe(&buf, 0)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let (payload, _) =
+        unframe(&buf, 0).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     decode_summary(payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
@@ -92,7 +92,10 @@ pub fn encode_part(part: &Part) -> Vec<u8> {
     let n = batch.len();
     let mut e = Encoder::with_capacity(n * 24 + 128);
 
-    e.u32(PART_MAGIC).u8(PART_VERSION).u64(part.id()).u64(n as u64);
+    e.u32(PART_MAGIC)
+        .u8(PART_VERSION)
+        .u64(part.id())
+        .u64(n as u64);
 
     // Version stamps. Uniform costs 9 bytes total rather than 8 per row —
     // the M0-2 finding that this is ~86% of the index budget.

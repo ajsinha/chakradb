@@ -119,7 +119,10 @@ impl Part {
     /// Panics if the batch is not sorted by its key column — an internal
     /// invariant whose violation would corrupt lookups.
     pub fn new(id: u64, batch: Batch, created: CreatedCsns) -> Self {
-        assert!(batch.is_sorted_by_key(), "part {id}: batch not sorted by key");
+        assert!(
+            batch.is_sorted_by_key(),
+            "part {id}: batch not sorted by key"
+        );
         if let CreatedCsns::PerRow(v) = &created {
             assert_eq!(v.len(), batch.len(), "part {id}: csn/row length mismatch");
         }
@@ -427,9 +430,15 @@ mod tests {
 
     #[test]
     fn collapse_rules() {
-        assert!(CreatedCsns::PerRow(vec![7, 7, 7]).maybe_collapse(0).is_uniform());
-        assert!(CreatedCsns::PerRow(vec![1, 2, 3]).maybe_collapse(10).is_uniform());
-        assert!(!CreatedCsns::PerRow(vec![1, 20]).maybe_collapse(10).is_uniform());
+        assert!(CreatedCsns::PerRow(vec![7, 7, 7])
+            .maybe_collapse(0)
+            .is_uniform());
+        assert!(CreatedCsns::PerRow(vec![1, 2, 3])
+            .maybe_collapse(10)
+            .is_uniform());
+        assert!(!CreatedCsns::PerRow(vec![1, 20])
+            .maybe_collapse(10)
+            .is_uniform());
         assert!(CreatedCsns::PerRow(vec![]).maybe_collapse(0).is_uniform());
     }
 

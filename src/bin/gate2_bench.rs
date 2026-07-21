@@ -77,9 +77,15 @@ fn main() {
 
     let queries = [
         ("COUNT(*)", "SELECT COUNT(*) FROM hits"),
-        ("SUM(a) WHERE a > 500", "SELECT SUM(a) FROM hits WHERE a > 500"),
+        (
+            "SUM(a) WHERE a > 500",
+            "SELECT SUM(a) FROM hits WHERE a > 500",
+        ),
         ("GROUP BY a", "SELECT a, COUNT(*) FROM hits GROUP BY a"),
-        ("ORDER BY b LIMIT 100", "SELECT pk FROM hits ORDER BY b DESC LIMIT 100"),
+        (
+            "ORDER BY b LIMIT 100",
+            "SELECT pk FROM hits ORDER BY b DESC LIMIT 100",
+        ),
         ("COUNT(DISTINCT a)", "SELECT DISTINCT a FROM hits"),
     ];
     for (label, sql) in queries {

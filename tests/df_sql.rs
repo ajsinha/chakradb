@@ -20,10 +20,14 @@ fn one(e: &SqlEngine, sql: &str) -> String {
 #[test]
 fn basic_aggregates_are_correct_via_datafusion() {
     let e = engine();
-    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
+    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)")
+        .unwrap();
     for i in 1..=10 {
-        e.run(&format!("INSERT INTO t VALUES ({i}, {}, {i}.0, 'x')", i * 10))
-            .unwrap();
+        e.run(&format!(
+            "INSERT INTO t VALUES ({i}, {}, {i}.0, 'x')",
+            i * 10
+        ))
+        .unwrap();
     }
     // SUM of an integer column is an integer (DuckDB/DataFusion convention).
     assert_eq!(one(&e, "SELECT SUM(a) FROM t"), "550");
@@ -37,12 +41,14 @@ fn basic_aggregates_are_correct_via_datafusion() {
 #[test]
 fn group_by_and_order_by() {
     let e = engine();
-    e.run("CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT)").unwrap();
+    e.run("CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT)")
+        .unwrap();
     for (i, (r, a)) in [("west", 10), ("east", 20), ("west", 5), ("east", 7)]
         .iter()
         .enumerate()
     {
-        e.run(&format!("INSERT INTO sales VALUES ({}, '{r}', {a})", i + 1)).unwrap();
+        e.run(&format!("INSERT INTO sales VALUES ({}, '{r}', {a})", i + 1))
+            .unwrap();
     }
     let rows = e
         .query("SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region")
@@ -55,8 +61,10 @@ fn group_by_and_order_by() {
 #[test]
 fn join_across_two_tables() {
     let e = engine();
-    e.run("CREATE TABLE customers (id INT PRIMARY KEY, name TEXT)").unwrap();
-    e.run("CREATE TABLE orders (id INT PRIMARY KEY, cust INT, total INT)").unwrap();
+    e.run("CREATE TABLE customers (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    e.run("CREATE TABLE orders (id INT PRIMARY KEY, cust INT, total INT)")
+        .unwrap();
     e.run("INSERT INTO customers VALUES (1, 'alice')").unwrap();
     e.run("INSERT INTO customers VALUES (2, 'bob')").unwrap();
     e.run("INSERT INTO orders VALUES (10, 1, 100)").unwrap();
@@ -78,9 +86,11 @@ fn join_across_two_tables() {
 #[test]
 fn window_function() {
     let e = engine();
-    e.run("CREATE TABLE t (pk INT PRIMARY KEY, grp INT, v INT)").unwrap();
+    e.run("CREATE TABLE t (pk INT PRIMARY KEY, grp INT, v INT)")
+        .unwrap();
     for (i, (g, v)) in [(1, 5), (1, 9), (2, 3)].iter().enumerate() {
-        e.run(&format!("INSERT INTO t VALUES ({}, {g}, {v})", i + 1)).unwrap();
+        e.run(&format!("INSERT INTO t VALUES ({}, {g}, {v})", i + 1))
+            .unwrap();
     }
     // ROW_NUMBER() over a partition — rejected by the interpreter, runs here.
     let rows = e
@@ -101,11 +111,15 @@ fn correlated_subquery() {
     let e = engine();
     e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT)").unwrap();
     for i in 1..=5 {
-        e.run(&format!("INSERT INTO t VALUES ({i}, {})", i * 10)).unwrap();
+        e.run(&format!("INSERT INTO t VALUES ({i}, {})", i * 10))
+            .unwrap();
     }
     // Rows above the average — a subquery the interpreter rejects.
     assert_eq!(
-        one(&e, "SELECT COUNT(*) FROM t WHERE a > (SELECT AVG(a) FROM t)"),
+        one(
+            &e,
+            "SELECT COUNT(*) FROM t WHERE a > (SELECT AVG(a) FROM t)"
+        ),
         "2"
     );
 }
@@ -113,7 +127,8 @@ fn correlated_subquery() {
 #[test]
 fn writes_still_go_through_the_interpreter_and_are_visible() {
     let e = engine();
-    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
+    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)")
+        .unwrap();
     e.run("INSERT INTO t VALUES (1, 1, 0, 'a')").unwrap();
     e.run("INSERT INTO t VALUES (2, 2, 0, 'b')").unwrap();
     e.run("DELETE FROM t WHERE pk = 1").unwrap();

@@ -4,7 +4,7 @@
 //! NFR-03): scans must not block while writes are in flight, and neither side
 //! may observe a torn or impossible state.
 
-use chakradb::{Database, Error, Row, Rng, Value};
+use chakradb::{Database, Error, Rng, Row, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -219,10 +219,9 @@ fn mixed_workload_preserves_invariants() {
                     let pk = (id * 10_000 + i) as i64;
                     t.insert(row(pk, "x")).unwrap();
                     live.fetch_add(1, Ordering::Relaxed);
-                    if rng.chance(0.3)
-                        && t.delete(&Value::Int(pk)).is_ok() {
-                            live.fetch_sub(1, Ordering::Relaxed);
-                        }
+                    if rng.chance(0.3) && t.delete(&Value::Int(pk)).is_ok() {
+                        live.fetch_sub(1, Ordering::Relaxed);
+                    }
                 }
             })
         })

@@ -301,8 +301,8 @@ mod tests {
         let rows: Vec<Row> = (0..5).map(r).collect();
         let b = Batch::from_rows(&s, &rows);
         assert_eq!(b.len(), 5);
-        for i in 0..5 {
-            assert_eq!(b.row(i), rows[i]);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(&b.row(i), row);
         }
     }
 
@@ -319,7 +319,7 @@ mod tests {
     fn nulls_survive_the_round_trip() {
         let s = Schema::default_schema();
         let row = Row::from_values(vec![Value::Int(1), Value::Null, Value::Null, Value::Null]);
-        let b = Batch::from_rows(&s, &[row.clone()]);
+        let b = Batch::from_rows(&s, std::slice::from_ref(&row));
         assert_eq!(b.row(0), row);
     }
 

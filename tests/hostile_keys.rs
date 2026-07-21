@@ -12,7 +12,7 @@
 //! makes bounds useless and forces a Bloom probe on every part. If correctness
 //! or the Bloom filter fails here, §5.2's funnel does not hold in general.
 
-use chakradb::{Database, Metrics, Row, Rng, TableConfig, Value};
+use chakradb::{Database, Metrics, Rng, Row, TableConfig, Value};
 
 fn row(pk: i64, tag: &str) -> Row {
     // wrapping_mul: this suite deliberately uses i64::MIN / i64::MAX as keys.
@@ -53,7 +53,11 @@ fn overlapping_ranges_defeat_bounds_but_bloom_holds() {
     t.seal();
 
     let stats = t.stats();
-    assert!(stats.num_parts >= 15, "expected many parts, got {}", stats.num_parts);
+    assert!(
+        stats.num_parts >= 15,
+        "expected many parts, got {}",
+        stats.num_parts
+    );
 
     // Every part should now span nearly the entire key space.
     let before = t.metrics().snapshot();
@@ -105,8 +109,8 @@ fn absent_keys_are_rejected_cheaply_under_overlap() {
     let after = t.metrics().snapshot();
 
     let probes = (after.parts_probed - before.parts_probed) as f64;
-    let skips = (after.bloom_skips - before.bloom_skips + after.bounds_skips - before.bounds_skips)
-        as f64;
+    let skips =
+        (after.bloom_skips - before.bloom_skips + after.bounds_skips - before.bounds_skips) as f64;
     assert!(
         skips / probes.max(1.0) > 0.9,
         "absent-key probes should be eliminated before data: {:.1}%",
@@ -155,7 +159,11 @@ fn extreme_key_values_do_not_break_bounds() {
 
     let snap = db.snapshot();
     for (i, &pk) in keys.iter().enumerate() {
-        assert_eq!(t.get(&Value::Int(pk), snap).unwrap().c(), format!("k{i}"), "lost {pk}");
+        assert_eq!(
+            t.get(&Value::Int(pk), snap).unwrap().c(),
+            format!("k{i}"),
+            "lost {pk}"
+        );
     }
     assert!(t.get(&Value::Int(12_345), snap).is_none());
 }

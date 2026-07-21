@@ -48,7 +48,12 @@ pub fn snapshot_memtable(table: &Table, snap: Snapshot) -> MemTable {
     let batches: Vec<RecordBatch> = table
         .scan_segments(snap)
         .iter()
-        .map(|seg| seg.batch().record_batch().project(&keep).expect("project batch"))
+        .map(|seg| {
+            seg.batch()
+                .record_batch()
+                .project(&keep)
+                .expect("project batch")
+        })
         .filter(|rb| rb.num_rows() > 0)
         .collect();
     MemTable::try_new(arrow_schema, vec![batches]).expect("memtable from snapshot")

@@ -161,7 +161,8 @@ pub fn plan_merge(
     }
     let batch = Batch::from_rows(&schema, &merged_rows);
 
-    let mut merged = Part::with_deletions(new_part_id, batch, CreatedCsns::PerRow(created), &deletions);
+    let mut merged =
+        Part::with_deletions(new_part_id, batch, CreatedCsns::PerRow(created), &deletions);
     // Version-metadata GC: collapse per-row stamps when indistinguishable.
     // M0-2 found this is ~86% of the index budget.
     merged.collapse_versions(horizon);
@@ -181,11 +182,7 @@ pub fn plan_merge(
 /// Returns the number of parts replaced, or 0 if the plan is stale (its source
 /// parts are no longer all present, e.g. a concurrent compaction won the race).
 pub fn apply_plan(parts: &mut Vec<Arc<Part>>, plan: MergePlan, metrics: &Metrics) -> usize {
-    let present: HashMap<u64, usize> = parts
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.id(), i))
-        .collect();
+    let present: HashMap<u64, usize> = parts.iter().enumerate().map(|(i, p)| (p.id(), i)).collect();
 
     if !plan.source_ids.iter().all(|id| present.contains_key(id)) {
         Metrics::bump(&metrics.compactions_discarded);
@@ -349,11 +346,17 @@ mod tests {
         assert_eq!(apply_plan(&mut parts, plan, &Metrics::new()), 2);
         let merged = &parts[0];
         assert!(
-            merged.lookup(&Value::Int(2), crate::csn::Snapshot::at(60)).ordinal().is_none(),
+            merged
+                .lookup(&Value::Int(2), crate::csn::Snapshot::at(60))
+                .ordinal()
+                .is_none(),
             "delete issued during the merge was lost"
         );
         assert!(
-            merged.lookup(&Value::Int(2), crate::csn::Snapshot::at(55)).ordinal().is_some(),
+            merged
+                .lookup(&Value::Int(2), crate::csn::Snapshot::at(55))
+                .ordinal()
+                .is_some(),
             "older snapshot must still see it"
         );
     }

@@ -45,7 +45,10 @@ fn snapshot_is_stable_across_many_mutations() {
 
     let after = t.scan(snap);
     assert_eq!(after.len(), expected.len());
-    assert!((0..after.len()).all(|i| after.value(3, i).render() == "v0"), "old snapshot changed");
+    assert!(
+        (0..after.len()).all(|i| after.value(3, i).render() == "v0"),
+        "old snapshot changed"
+    );
 }
 
 #[test]
@@ -62,8 +65,15 @@ fn exactly_one_version_visible_at_every_snapshot() {
 
     for (i, snap) in checkpoints.iter().enumerate() {
         let b = t.scan(*snap);
-        let matching: Vec<_> = (0..b.len()).filter(|&j| b.key(j).as_int() == Some(1)).collect();
-        assert_eq!(matching.len(), 1, "snapshot {i} saw {} versions", matching.len());
+        let matching: Vec<_> = (0..b.len())
+            .filter(|&j| b.key(j).as_int() == Some(1))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "snapshot {i} saw {} versions",
+            matching.len()
+        );
         assert_eq!(b.value(3, matching[0]).render(), format!("v{i}"));
     }
 }
@@ -90,7 +100,10 @@ fn reinsert_after_delete_is_a_new_version() {
     let gap = db.snapshot();
     t.insert(row(1, "second")).unwrap();
 
-    assert!(t.get(&Value::Int(1), gap).is_none(), "must be absent in the gap");
+    assert!(
+        t.get(&Value::Int(1), gap).is_none(),
+        "must be absent in the gap"
+    );
     assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "second");
     assert_eq!(t.row_count(db.snapshot()), 1);
 }
