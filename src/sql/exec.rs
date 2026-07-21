@@ -46,8 +46,8 @@ impl Outcome {
 /// Execute a plan against a database.
 pub fn execute(db: &Database, plan: Plan) -> Result<Outcome, Error> {
     match plan {
-        Plan::CreateTable { name } => {
-            db.create_table(&name)?;
+        Plan::CreateTable { name, schema } => {
+            db.create_table_schema(&name, schema)?;
             Ok(Outcome::Affected(0))
         }
         Plan::Insert { table, rows } => exec_insert(db, &table, rows),
@@ -185,7 +185,7 @@ fn exec_select(db: &Database, plan: Plan) -> Result<Outcome, Error> {
         dedup(&mut rows);
     }
     if !order_by.is_empty() {
-        sort_rows(&mut rows, &order_by, &columns);
+        sort_rows(&mut rows, &order_by, &projections);
     }
     if let Some(n) = limit {
         rows.truncate(n);
@@ -633,14 +633,13 @@ fn dedup(rows: &mut Vec<Vec<String>>) {
     rows.retain(|r| seen.insert(r.clone()));
 }
 
-fn sort_rows(rows: &mut [Vec<String>], keys: &[OrderKey], columns: &[String]) {
-    // ORDER BY over projected output: match each key expression to an output
-    // column when it is a bare column reference, else evaluate against source.
-    let _ = columns;
+fn sort_rows(rows: &mut [Vec<String>], keys: &[OrderKey], projections: &[Projection]) {
+    // ORDER BY over projected output. A key that names a column is matched to the
+    // *output* position that projects it — not its schema index, which differs
+    // once a query groups or reorders columns.
     rows.sort_by(|a, b| {
         for (ki, key) in keys.iter().enumerate() {
-            // Sort by the corresponding output column position when available.
-            let idx = key_column_index(key, ki).min(a.len().saturating_sub(1));
+            let idx = output_index(key, projections, ki).min(a.len().saturating_sub(1));
             let ord = a[idx].cmp(&b[idx]);
             let ord = if key.ascending { ord } else { ord.reverse() };
             if ord != std::cmp::Ordering::Equal {
@@ -651,11 +650,19 @@ fn sort_rows(rows: &mut [Vec<String>], keys: &[OrderKey], columns: &[String]) {
     });
 }
 
-fn key_column_index(key: &OrderKey, fallback: usize) -> usize {
-    match &key.expr {
-        Expr::Column(i) => *i,
-        _ => fallback,
+/// The output column position an ORDER BY key sorts by: the projection that
+/// emits that column, else `fallback`.
+fn output_index(key: &OrderKey, projections: &[Projection], fallback: usize) -> usize {
+    if let Expr::Column(ci) = &key.expr {
+        for (j, p) in projections.iter().enumerate() {
+            if let Projection::Expr(Expr::Column(pj), _) = p {
+                if pj == ci {
+                    return j;
+                }
+            }
+        }
     }
+    fallback
 }
 
 #[cfg(test)]

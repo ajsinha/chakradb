@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 fn engine_with(seed: u64, n: i64) -> SqlEngine {
     let e = SqlEngine::new(Arc::new(Database::new()));
-    e.run("CREATE TABLE t (pk INT)").unwrap();
+    e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
     let mut rng = Rng::new(seed);
     for pk in 0..n {
         // Some columns randomly held back so NULLs and edge values appear.

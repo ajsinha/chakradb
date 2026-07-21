@@ -7,7 +7,7 @@ use chakradb::sql::plan::{plan, AggFn, Plan, Projection};
 fn create_table() {
     assert!(matches!(
         plan("CREATE TABLE t (pk INT)").unwrap(),
-        Plan::CreateTable { name } if name == "t"
+        Plan::CreateTable { name, .. } if name == "t"
     ));
 }
 
