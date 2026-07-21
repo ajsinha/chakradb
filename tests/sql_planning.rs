@@ -18,8 +18,8 @@ fn insert_with_explicit_columns() {
         Plan::Insert { table, rows } => {
             assert_eq!(table, "t");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].pk, 1);
-            assert_eq!(rows[0].c, "x");
+            assert_eq!(rows[0].pk(), 1);
+            assert_eq!(rows[0].c(), "x");
         }
         _ => panic!(),
     }
@@ -39,8 +39,8 @@ fn insert_negative_number() {
     let p = plan("INSERT INTO t VALUES (-5, -10, -2.5, 'n')").unwrap();
     match p {
         Plan::Insert { rows, .. } => {
-            assert_eq!(rows[0].pk, -5);
-            assert_eq!(rows[0].b, -2.5);
+            assert_eq!(rows[0].pk(), -5);
+            assert_eq!(rows[0].b(), -2.5);
         }
         _ => panic!(),
     }

@@ -13,7 +13,7 @@
 //! asserted here rather than left implicit.
 
 use chakradb::io::MemIo;
-use chakradb::{Row, Storage, StorageConfig, TableConfig};
+use chakradb::{Row, Storage, StorageConfig, TableConfig, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -79,14 +79,14 @@ fn bounds_reject_absent_keys_without_faulting() {
     let s = Storage::open(io, cfg(1_000)).unwrap();
 
     // Keys outside every part's range are refused from summaries alone.
-    assert!(!s.may_contain_key("t", -1));
-    assert!(!s.may_contain_key("t", 999_999));
+    assert!(!s.may_contain_key("t", &Value::Int(-1)));
+    assert!(!s.may_contain_key("t", &Value::Int(999_999)));
     assert_eq!(
         s.pager_metrics().parts_faulted.load(Ordering::Relaxed),
         0,
         "out-of-range probe faulted a part in"
     );
-    assert!(s.may_contain_key("t", 5_000), "in-range key was excluded");
+    assert!(s.may_contain_key("t", &Value::Int(5_000)), "in-range key was excluded");
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn warming_materialises_everything_correctly() {
 
     // And the data is right.
     for pk in (0..10_000).step_by(311) {
-        assert_eq!(t.get_latest(pk).unwrap().c, format!("v{pk}"));
+        assert_eq!(t.get_latest(&Value::Int(pk)).unwrap().c(), format!("v{pk}"));
     }
 }
 
@@ -131,7 +131,7 @@ fn a_wal_tail_forces_warming_and_stays_correct() {
     {
         let s = Storage::open(io.clone(), cfg(1_000)).unwrap();
         for pk in 0..200 {
-            s.delete("t", pk).unwrap();
+            s.delete("t", &Value::Int(pk)).unwrap();
         }
         for pk in 8_000..8_100 {
             s.insert("t", row(pk)).unwrap();
@@ -148,10 +148,10 @@ fn a_wal_tail_forces_warming_and_stays_correct() {
     let snap = db.snapshot();
     assert_eq!(t.row_count(snap), 8_000 - 200 + 100);
     for pk in 0..200 {
-        assert!(t.get(pk, snap).is_none(), "deleted pk={pk} came back");
+        assert!(t.get(&Value::Int(pk), snap).is_none(), "deleted pk={pk} came back");
     }
     for pk in 8_000..8_100 {
-        assert!(t.get(pk, snap).is_some(), "tail insert pk={pk} lost");
+        assert!(t.get(&Value::Int(pk), snap).is_some(), "tail insert pk={pk} lost");
     }
 }
 

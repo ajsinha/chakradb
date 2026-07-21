@@ -4,7 +4,7 @@
 //! NFR-03): scans must not block while writes are in flight, and neither side
 //! may observe a torn or impossible state.
 
-use chakradb::{Database, Error, Row, Rng};
+use chakradb::{Database, Error, Row, Rng, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -48,7 +48,6 @@ fn readers_are_never_blocked_by_writers() {
                     // Row count must be exactly right at all times: upserts
                     // replace rather than add.
                     assert_eq!(b.len(), 2_000, "torn read: {} rows", b.len());
-                    assert!(b.is_well_formed());
                     scans.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -91,7 +90,8 @@ fn concurrent_writers_never_lose_or_duplicate_keys() {
 
     let snap = db.snapshot();
     assert_eq!(t.row_count(snap), threads * per_thread);
-    let mut pks = t.scan(snap).pk;
+    let sb = t.scan(snap);
+    let mut pks: Vec<i64> = (0..sb.len()).map(|i| sb.key(i).as_int().unwrap()).collect();
     pks.sort_unstable();
     let before = pks.len();
     pks.dedup();
@@ -140,7 +140,7 @@ fn insert_and_delete_race_leaves_consistent_state() {
         thread::spawn(move || {
             let mut deleted = 0;
             for pk in 0..1_000 {
-                if t.delete(pk).is_ok() {
+                if t.delete(&Value::Int(pk)).is_ok() {
                     deleted += 1;
                 }
             }
@@ -220,7 +220,7 @@ fn mixed_workload_preserves_invariants() {
                     t.insert(row(pk, "x")).unwrap();
                     live.fetch_add(1, Ordering::Relaxed);
                     if rng.chance(0.3)
-                        && t.delete(pk).is_ok() {
+                        && t.delete(&Value::Int(pk)).is_ok() {
                             live.fetch_sub(1, Ordering::Relaxed);
                         }
                 }

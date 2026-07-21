@@ -38,7 +38,7 @@
 //! ## Example
 //!
 //! ```
-//! use chakradb::{Database, Row};
+//! use chakradb::{Database, Row, Value};
 //!
 //! let db = Database::new();
 //! let users = db.create_table("users").unwrap();
@@ -50,8 +50,8 @@
 //! let before = db.snapshot();
 //! users.update(Row::new(1, 999, 1.5, "alice-v2")).unwrap();
 //!
-//! assert_eq!(users.get(1, before).unwrap().c, "alice");
-//! assert_eq!(users.get_latest(1).unwrap().c, "alice-v2");
+//! assert_eq!(users.get(&Value::Int(1), before).unwrap().c(), "alice");
+//! assert_eq!(users.get_latest(&Value::Int(1)).unwrap().c(), "alice-v2");
 //! assert_eq!(users.row_count(db.snapshot()), 2);
 //! ```
 

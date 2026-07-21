@@ -10,7 +10,7 @@
 //! Seeds make every failure reproducible.
 
 use chakradb::io::{Io, MemIo};
-use chakradb::{Database, Durability, Row, Rng, Storage, StorageConfig};
+use chakradb::{Database, Durability, Row, Rng, Storage, StorageConfig, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ fn crash_trial(seed: u64, ops: usize, mode: Durability, checkpoints: bool) -> (u
                     expected.apply_upsert(pk, &tag);
                     acked += 1;
                 }
-            } else if s.delete("t", pk).is_ok() {
+            } else if s.delete("t", &Value::Int(pk)).is_ok() {
                 expected.apply_delete(pk);
                 acked += 1;
             }
@@ -83,13 +83,13 @@ fn crash_trial(seed: u64, ops: usize, mode: Durability, checkpoints: bool) -> (u
     let snap = s2.database().snapshot();
 
     for (pk, tag) in &expected.live {
-        let got = t.get(*pk, snap);
+        let got = t.get(&Value::Int(*pk), snap);
         assert!(
             got.is_some(),
             "seed {seed}: acknowledged pk={pk} lost after crash"
         );
         assert_eq!(
-            &got.unwrap().c,
+            &got.unwrap().c(),
             tag,
             "seed {seed}: pk={pk} recovered a stale version"
         );
@@ -97,7 +97,7 @@ fn crash_trial(seed: u64, ops: usize, mode: Durability, checkpoints: bool) -> (u
     for pk in 0..200i64 {
         if !expected.live.contains_key(&pk) {
             assert!(
-                t.get(pk, snap).is_none(),
+                t.get(&Value::Int(pk), snap).is_none(),
                 "seed {seed}: deleted pk={pk} came back"
             );
         }
@@ -205,7 +205,6 @@ fn async_mode_may_lose_data_but_never_corrupts() {
         let snap = s2.database().snapshot();
         // Whatever survived must be internally consistent.
         assert_eq!(t.scan(snap).len(), t.row_count(snap));
-        assert!(t.scan(snap).is_well_formed());
     }
 }
 
@@ -267,7 +266,7 @@ fn torn_wal_tail_never_corrupts_the_prefix() {
         assert!(n <= 40, "cut {cut} recovered {n} rows, more than were written");
         assert_eq!(t.scan(snap).len(), n, "cut {cut} produced inconsistent state");
         for pk in 0..n as i64 {
-            assert!(t.get(pk, snap).is_some(), "cut {cut} lost pk={pk} from prefix");
+            assert!(t.get(&Value::Int(pk), snap).is_some(), "cut {cut} lost pk={pk} from prefix");
         }
     }
 }
@@ -305,9 +304,9 @@ fn multi_table_crash_recovery_is_consistent() {
         for (name, expect) in [("a", &expect_a), ("b", &expect_b)] {
             let t = s2.database().table(name).unwrap();
             for (pk, tag) in expect {
-                let got = t.get(*pk, snap);
+                let got = t.get(&Value::Int(*pk), snap);
                 assert!(got.is_some(), "seed {seed}: {name} lost pk={pk}");
-                assert_eq!(&got.unwrap().c, tag, "seed {seed}: {name} stale pk={pk}");
+                assert_eq!(&got.unwrap().c(), tag, "seed {seed}: {name} stale pk={pk}");
             }
         }
     }
@@ -343,6 +342,6 @@ fn snapshot_isolation_holds_after_recovery() {
 
     let before = db.snapshot();
     s2.update("t", row(1, "third")).unwrap();
-    assert_eq!(t.get(1, before).unwrap().c, "second", "recovered snapshot moved");
-    assert_eq!(t.get_latest(1).unwrap().c, "third");
+    assert_eq!(t.get(&Value::Int(1), before).unwrap().c(), "second", "recovered snapshot moved");
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "third");
 }

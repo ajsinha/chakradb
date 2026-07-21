@@ -86,7 +86,7 @@ fn sustained_ingest_reaches_equilibrium() {
             if rng.chance(0.85) {
                 let _ = s.upsert("t", row(pk, "v"));
             } else {
-                let _ = s.delete("t", pk);
+                let _ = s.delete("t", &chakradb::Value::Int(pk));
             }
             ops += 1;
         }

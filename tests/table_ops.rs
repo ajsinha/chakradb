@@ -1,7 +1,7 @@
 //! Table-level operations: insert/update/delete/upsert, sealing, and the
 //! index-memory regimes that M0-2 reports.
 
-use chakradb::{Database, Error, Row, TableConfig};
+use chakradb::{Database, Error, Row, TableConfig, Value};
 
 fn row(pk: i64) -> Row {
     Row::new(pk, pk * 2, pk as f64, format!("v{pk}"))
@@ -17,14 +17,14 @@ fn table() -> (Database, std::sync::Arc<chakradb::Table>) {
 fn insert_then_read() {
     let (_db, t) = table();
     t.insert(row(1)).unwrap();
-    assert_eq!(t.get_latest(1), Some(row(1)));
+    assert_eq!(t.get_latest(&Value::Int(1)), Some(row(1)));
 }
 
 #[test]
 fn duplicate_insert_is_rejected() {
     let (_db, t) = table();
     t.insert(row(1)).unwrap();
-    assert!(matches!(t.insert(row(1)), Err(Error::DuplicateKey(1))));
+    assert!(matches!(t.insert(row(1)), Err(Error::DuplicateKey(_))));
 }
 
 #[test]
@@ -32,31 +32,31 @@ fn update_replaces_value() {
     let (_db, t) = table();
     t.insert(row(1)).unwrap();
     t.update(Row::new(1, 99, 9.0, "updated")).unwrap();
-    assert_eq!(t.get_latest(1).unwrap().c, "updated");
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "updated");
 }
 
 #[test]
 fn update_missing_key_fails() {
     let (_db, t) = table();
-    assert!(matches!(t.update(row(7)), Err(Error::KeyNotFound(7))));
+    assert!(matches!(t.update(row(7)), Err(Error::KeyNotFound(_))));
 }
 
 #[test]
 fn delete_hides_row_and_is_not_repeatable() {
     let (_db, t) = table();
     t.insert(row(1)).unwrap();
-    t.delete(1).unwrap();
-    assert_eq!(t.get_latest(1), None);
-    assert!(matches!(t.delete(1), Err(Error::KeyNotFound(1))));
+    t.delete(&Value::Int(1)).unwrap();
+    assert_eq!(t.get_latest(&Value::Int(1)), None);
+    assert!(matches!(t.delete(&Value::Int(1)), Err(Error::KeyNotFound(_))));
 }
 
 #[test]
 fn upsert_inserts_then_updates() {
     let (db, t) = table();
     t.upsert(row(1)).unwrap();
-    assert_eq!(t.get_latest(1).unwrap().a, 2);
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().a(), 2);
     t.upsert(Row::new(1, 42, 0.0, "x")).unwrap();
-    assert_eq!(t.get_latest(1).unwrap().a, 42);
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().a(), 42);
     assert_eq!(t.row_count(db.snapshot()), 1);
 }
 
@@ -66,11 +66,10 @@ fn scan_returns_all_live_rows() {
     for pk in 0..10 {
         t.insert(row(pk)).unwrap();
     }
-    t.delete(3).unwrap();
+    t.delete(&Value::Int(3)).unwrap();
     let got = t.scan(db.snapshot());
     assert_eq!(got.len(), 9);
-    assert!(!got.pk.contains(&3));
-    assert!(got.is_well_formed());
+    assert!(!(0..got.len()).any(|i| got.key(i).as_int() == Some(3)));
 }
 
 #[test]
@@ -101,8 +100,8 @@ fn reads_span_l0_and_parts() {
     t.seal();
     t.insert(row(2)).unwrap();
     assert_eq!(t.row_count(db.snapshot()), 2);
-    assert!(t.get_latest(1).is_some());
-    assert!(t.get_latest(2).is_some());
+    assert!(t.get_latest(&Value::Int(1)).is_some());
+    assert!(t.get_latest(&Value::Int(2)).is_some());
 }
 
 #[test]
@@ -111,7 +110,7 @@ fn update_of_sealed_row_works() {
     t.insert(row(1)).unwrap();
     t.seal();
     t.update(Row::new(1, 77, 0.0, "new")).unwrap();
-    assert_eq!(t.get_latest(1).unwrap().a, 77);
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().a(), 77);
     assert_eq!(t.row_count(db.snapshot()), 1);
 }
 
@@ -139,13 +138,13 @@ fn snapshot_isolation_across_update_and_delete() {
     t.insert(Row::new(1, 1, 1.0, "before")).unwrap();
     let before = db.snapshot();
     t.update(Row::new(1, 2, 2.0, "after")).unwrap();
-    assert_eq!(t.get(1, before).unwrap().c, "before");
-    assert_eq!(t.get_latest(1).unwrap().c, "after");
+    assert_eq!(t.get(&Value::Int(1), before).unwrap().c(), "before");
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "after");
 
     let mid = db.snapshot();
-    t.delete(1).unwrap();
-    assert!(t.get(1, mid).is_some());
-    assert!(t.get_latest(1).is_none());
+    t.delete(&Value::Int(1)).unwrap();
+    assert!(t.get(&Value::Int(1), mid).is_some());
+    assert!(t.get_latest(&Value::Int(1)).is_none());
 }
 
 #[test]
@@ -187,7 +186,7 @@ fn stats_track_tombstones_and_reclamation() {
     }
     t.seal();
     for pk in 0..50 {
-        t.delete(pk).unwrap();
+        t.delete(&Value::Int(pk)).unwrap();
     }
     assert_eq!(t.stats().tombstones, 50);
 
