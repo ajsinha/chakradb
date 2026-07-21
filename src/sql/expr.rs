@@ -5,7 +5,8 @@
 //! `NULL AND true` is `NULL`. Getting this wrong is the single most common way a
 //! query engine returns subtly incorrect answers, so it is tested exhaustively.
 
-use super::value::{column_index, row_value, Value};
+use super::value::{batch_value, column_index, row_value, Value};
+use crate::schema::Batch;
 use crate::schema::Row;
 use std::cmp::Ordering;
 
@@ -52,6 +53,43 @@ impl Expr {
         column_index(name)
             .map(Expr::Column)
             .ok_or_else(|| format!("no such column: {name}"))
+    }
+
+    /// Record which of the four columns this expression reads.
+    pub fn columns_used(&self, used: &mut [bool; 4]) {
+        match self {
+            Expr::Column(i) => {
+                if *i < 4 {
+                    used[*i] = true;
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::Unary(_, e) | Expr::IsNull(e, _) => e.columns_used(used),
+            Expr::Binary(_, l, r) => {
+                l.columns_used(used);
+                r.columns_used(used);
+            }
+        }
+    }
+
+    /// Evaluate against batch row `i`, columnar — no `Row` materialised.
+    pub fn eval_at(&self, batch: &Batch, i: usize) -> Value {
+        match self {
+            Expr::Column(c) => batch_value(batch, *c, i),
+            Expr::Literal(v) => v.clone(),
+            Expr::IsNull(e, negated) => {
+                Value::Bool(e.eval_at(batch, i).is_null() != *negated)
+            }
+            Expr::Unary(op, e) => eval_unary(*op, e.eval_at(batch, i)),
+            Expr::Binary(op, l, r) => match op {
+                BinaryOp::And => eval_and(l.eval_at(batch, i), r.eval_at(batch, i)),
+                BinaryOp::Or => eval_or(l.eval_at(batch, i), r.eval_at(batch, i)),
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                    eval_arith(*op, l.eval_at(batch, i), r.eval_at(batch, i))
+                }
+                _ => eval_compare(*op, l.eval_at(batch, i), r.eval_at(batch, i)),
+            },
+        }
     }
 
     /// Evaluate against a row.

@@ -105,6 +105,38 @@ impl Batch {
         self.c.extend(other.c.iter().cloned());
     }
 
+    /// Append `other`, cloning only the columns `mask` marks as needed.
+    ///
+    /// Unneeded columns are filled with cheap placeholders (0 / 0.0 / empty
+    /// String — none of which allocate), preserving the all-columns-same-length
+    /// invariant while never touching a heap the query will not read. A
+    /// `SUM(a) WHERE a > 500` scan clones one column instead of four; a
+    /// `COUNT(*)` clones none. This is the single biggest interpreter win —
+    /// see `sql/exec.rs`.
+    pub fn extend_masked(&mut self, other: &Batch, mask: [bool; 4]) {
+        let n = other.len();
+        if mask[0] {
+            self.pk.extend_from_slice(&other.pk);
+        } else {
+            self.pk.resize(self.pk.len() + n, 0);
+        }
+        if mask[1] {
+            self.a.extend_from_slice(&other.a);
+        } else {
+            self.a.resize(self.a.len() + n, 0);
+        }
+        if mask[2] {
+            self.b.extend_from_slice(&other.b);
+        } else {
+            self.b.resize(self.b.len() + n, 0.0);
+        }
+        if mask[3] {
+            self.c.extend(other.c.iter().cloned());
+        } else {
+            self.c.resize(self.c.len() + n, String::new());
+        }
+    }
+
     /// Approximate resident bytes, including string heap.
     pub fn memory_bytes(&self) -> usize {
         let fixed = self.pk.capacity() * 8 + self.a.capacity() * 8 + self.b.capacity() * 8;

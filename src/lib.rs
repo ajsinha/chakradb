@@ -77,6 +77,8 @@ pub mod part;
 #[cfg(unix)]
 pub mod posix;
 pub mod persist;
+#[cfg(feature = "datafusion")]
+pub mod datafusion_bridge;
 pub mod rng;
 pub mod schema;
 pub mod sql;

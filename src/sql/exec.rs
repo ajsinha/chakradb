@@ -10,10 +10,11 @@
 
 use super::expr::Expr;
 use super::plan::{AggFn, OrderKey, Plan, Projection};
-use super::value::{row_value, Value};
+use super::value::{batch_value, Value};
 use crate::database::Database;
 use crate::error::Error;
-use crate::schema::Row;
+use crate::schema::{Batch, Row};
+use crate::table::Segment;
 use std::collections::BTreeMap;
 
 /// (column labels, per-column type chars, rendered rows).
@@ -137,22 +138,64 @@ fn exec_select(db: &Database, plan: Plan) -> Result<Outcome, Error> {
     };
 
     let t = db.table(&table)?;
-    let scanned = t.scan(db.snapshot());
-    let filtered: Vec<Row> = scanned.iter().filter(|r| passes(&filter, r)).collect();
+    let snap = db.snapshot();
 
-    let (columns, types, mut rows) = if group_by.is_empty()
-        && projections.iter().all(|p| matches!(p, Projection::Expr(..)))
-    {
-        project_rows(&projections, &filtered)
+    // Fast path: `SELECT COUNT(*) FROM t` with no filter answers from metadata,
+    // the way DuckDB does — no scan at all. This is the single most common
+    // analytical probe, and scanning millions of rows to count them is waste.
+    if is_bare_count_star(&projections, &filter, &group_by, &order_by, distinct) {
+        let label = match &projections[0] {
+            Projection::Agg(_, _, l) => l.clone(),
+            _ => "count".to_string(),
+        };
+        let n = t.row_count(snap);
+        return Ok(Outcome::Rows {
+            columns: vec![label],
+            types: vec!['I'],
+            rows: vec![vec![n.to_string()]],
+        });
+    }
+
+    // Zero-copy segment scan: fully-visible parts are read in place, never
+    // concatenated into a giant batch. The filter runs against each segment's
+    // own columns.
+    let segments = t.scan_segments(snap);
+
+    let non_grouped =
+        group_by.is_empty() && projections.iter().all(|p| matches!(p, Projection::Expr(..)));
+
+    // Non-grouped `ORDER BY` (without DISTINCT) sorts on keys evaluated from the
+    // *source* row — so `ORDER BY b` is honoured even when `b` is not projected —
+    // and with a `LIMIT` it renders only the surviving top-K. DISTINCT and
+    // grouped queries order by output columns, per SQL, and take the plain path.
+    if non_grouped && !order_by.is_empty() && !distinct {
+        return Ok(project_ordered(
+            &projections,
+            &segments,
+            &filter,
+            &order_by,
+            limit,
+        ));
+    }
+
+    // `SELECT DISTINCT <cols>` with no ORDER BY is a de-duplication over the
+    // projected values — the same shape as GROUP BY. Dedup on typed keys during
+    // the scan (holding only the distinct set, never 500k rendered strings).
+    if non_grouped && distinct && order_by.is_empty() {
+        return Ok(project_distinct(&projections, &segments, &filter, limit));
+    }
+
+    let (columns, types, mut rows) = if non_grouped {
+        project_rows(&projections, &segments, &filter)
     } else {
-        aggregate_rows(&projections, &group_by, &filtered)?
+        aggregate_rows(&projections, &group_by, &segments, &filter)?
     };
 
     if distinct {
         dedup(&mut rows);
     }
     if !order_by.is_empty() {
-        sort_rows(&mut rows, &order_by, &filtered, &columns);
+        sort_rows(&mut rows, &order_by, &columns);
     }
     if let Some(n) = limit {
         rows.truncate(n);
@@ -165,6 +208,159 @@ fn exec_select(db: &Database, plan: Plan) -> Result<Outcome, Error> {
     })
 }
 
+/// The non-grouped `SELECT DISTINCT` path. Dedups on typed projected values
+/// during the scan via a `BTreeSet`, so it holds only the distinct set and
+/// renders each survivor once — instead of rendering every input row.
+fn project_distinct(
+    projections: &[Projection],
+    segments: &[Segment],
+    filter: &Option<Expr>,
+    limit: Option<usize>,
+) -> Outcome {
+    let columns: Vec<String> = projections
+        .iter()
+        .map(|p| match p {
+            Projection::Expr(_, l) | Projection::Agg(_, _, l) => l.clone(),
+        })
+        .collect();
+    let single = projections.len() == 1;
+
+    let mut seen: std::collections::BTreeSet<GroupKey> = std::collections::BTreeSet::new();
+    for seg in segments {
+        let batch = seg.batch();
+        for i in 0..batch.len() {
+            if !passes_at(filter, batch, i) {
+                continue;
+            }
+            let key = if single {
+                if let Projection::Expr(e, _) = &projections[0] {
+                    GroupKey::One(OrdVal(e.eval_at(batch, i)))
+                } else {
+                    continue;
+                }
+            } else {
+                GroupKey::Many(
+                    projections
+                        .iter()
+                        .filter_map(|p| match p {
+                            Projection::Expr(e, _) => Some(OrdVal(e.eval_at(batch, i))),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            };
+            seen.insert(key);
+        }
+    }
+
+    let mut types = vec!['?'; projections.len()];
+    let mut rows = Vec::with_capacity(seen.len());
+    for key in &seen {
+        let mut rendered = Vec::with_capacity(projections.len());
+        for (col, _) in projections.iter().enumerate() {
+            if let Some(v) = key.component(col) {
+                if types[col] == '?' {
+                    types[col] = v.0.type_char();
+                }
+                rendered.push(v.0.render());
+            }
+        }
+        rows.push(rendered);
+        if limit.is_some_and(|n| rows.len() >= n) {
+            break;
+        }
+    }
+
+    Outcome::Rows {
+        columns,
+        types,
+        rows,
+    }
+}
+
+/// The non-grouped `ORDER BY` path. Evaluates sort keys from the source row,
+/// selects the top-K when a `LIMIT` is present (so only K rows are rendered),
+/// then renders the survivors in order.
+fn project_ordered(
+    projections: &[Projection],
+    segments: &[Segment],
+    filter: &Option<Expr>,
+    order_by: &[OrderKey],
+    limit: Option<usize>,
+) -> Outcome {
+    let columns: Vec<String> = projections
+        .iter()
+        .map(|p| match p {
+            Projection::Expr(_, l) | Projection::Agg(_, _, l) => l.clone(),
+        })
+        .collect();
+
+    // (sort key, segment index, row index) for every row that passes the filter.
+    // The single-key case (by far the common one) stores the key inline, with no
+    // per-row heap allocation — critical when sorting hundreds of thousands of
+    // rows.
+    let mut keyed: Vec<(SortKey, usize, usize)> = Vec::new();
+    for (si, seg) in segments.iter().enumerate() {
+        let batch = seg.batch();
+        for i in 0..batch.len() {
+            if !passes_at(filter, batch, i) {
+                continue;
+            }
+            let key = if order_by.len() == 1 {
+                SortKey::One(OrdVal(order_by[0].expr.eval_at(batch, i)))
+            } else {
+                SortKey::Many(order_by.iter().map(|o| OrdVal(o.expr.eval_at(batch, i))).collect())
+            };
+            keyed.push((key, si, i));
+        }
+    }
+
+    let cmp = |a: &(SortKey, usize, usize), b: &(SortKey, usize, usize)| {
+        for (ki, o) in order_by.iter().enumerate() {
+            let ord = a.0.at(ki).cmp(b.0.at(ki));
+            let ord = if o.ascending { ord } else { ord.reverse() };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    };
+
+    // Top-K: partition so the K best are first, then sort only those.
+    match limit {
+        Some(k) if k < keyed.len() => {
+            keyed.select_nth_unstable_by(k, &cmp);
+            keyed.truncate(k);
+            keyed.sort_by(&cmp);
+        }
+        _ => keyed.sort_by(&cmp),
+    }
+
+    // Render only the survivors.
+    let mut types = vec!['?'; projections.len()];
+    let mut rows = Vec::with_capacity(keyed.len());
+    for (_, si, i) in &keyed {
+        let batch = segments[*si].batch();
+        let mut rendered = Vec::with_capacity(projections.len());
+        for (col, p) in projections.iter().enumerate() {
+            if let Projection::Expr(e, _) = p {
+                let v = e.eval_at(batch, *i);
+                if types[col] == '?' {
+                    types[col] = v.type_char();
+                }
+                rendered.push(v.render());
+            }
+        }
+        rows.push(rendered);
+    }
+
+    Outcome::Rows {
+        columns,
+        types,
+        rows,
+    }
+}
+
 /// Whether a row passes an optional predicate. Absent predicate = all rows.
 fn passes(filter: &Option<Expr>, row: &Row) -> bool {
     match filter {
@@ -173,10 +369,33 @@ fn passes(filter: &Option<Expr>, row: &Row) -> bool {
     }
 }
 
-fn project_rows(
+/// The query is exactly `SELECT COUNT(*) FROM t` with nothing else — the case
+/// the metadata fast path can answer without scanning.
+fn is_bare_count_star(
     projections: &[Projection],
-    rows: &[Row],
-) -> ResultSet {
+    filter: &Option<Expr>,
+    group_by: &[usize],
+    order_by: &[OrderKey],
+    distinct: bool,
+) -> bool {
+    filter.is_none()
+        && group_by.is_empty()
+        && order_by.is_empty()
+        && !distinct
+        && projections.len() == 1
+        && matches!(projections[0], Projection::Agg(AggFn::Count, None, _))
+}
+
+/// Whether batch row `i` passes an optional predicate, evaluated columnar.
+#[inline]
+fn passes_at(filter: &Option<Expr>, batch: &Batch, i: usize) -> bool {
+    match filter {
+        None => true,
+        Some(e) => e.eval_at(batch, i).is_true(),
+    }
+}
+
+fn project_rows(projections: &[Projection], segments: &[Segment], filter: &Option<Expr>) -> ResultSet {
     let columns: Vec<String> = projections
         .iter()
         .map(|p| match p {
@@ -184,22 +403,101 @@ fn project_rows(
             Projection::Agg(_, _, label) => label.clone(),
         })
         .collect();
-    let mut out = Vec::with_capacity(rows.len());
+    let mut out = Vec::new();
     let mut types = vec!['?'; projections.len()];
-    for row in rows {
-        let mut rendered = Vec::with_capacity(projections.len());
-        for (i, p) in projections.iter().enumerate() {
-            if let Projection::Expr(e, _) = p {
-                let v = e.eval(row);
-                if types[i] == '?' {
-                    types[i] = v.type_char();
-                }
-                rendered.push(v.render());
+    for seg in segments {
+        let batch = seg.batch();
+        for row_i in 0..batch.len() {
+            if !passes_at(filter, batch, row_i) {
+                continue;
             }
+            let mut rendered = Vec::with_capacity(projections.len());
+            for (i, p) in projections.iter().enumerate() {
+                if let Projection::Expr(e, _) = p {
+                    let v = e.eval_at(batch, row_i);
+                    if types[i] == '?' {
+                        types[i] = v.type_char();
+                    }
+                    rendered.push(v.render());
+                }
+            }
+            out.push(rendered);
         }
-        out.push(rendered);
     }
     (columns, types, out)
+}
+
+/// A group key component that orders by `Value::total_cmp` (a total order over
+/// all SQL values, NULLs first). Wrapping lets a `BTreeMap` key on typed values
+/// directly — so grouping never renders a `String` per row, only per group at
+/// the end. On a 500k-row `GROUP BY`, that removes 500k heap allocations.
+#[derive(Clone)]
+struct OrdVal(Value);
+impl PartialEq for OrdVal {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0).is_eq()
+    }
+}
+impl Eq for OrdVal {}
+impl PartialOrd for OrdVal {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrdVal {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// A sort key that avoids a heap allocation for the common single-column
+/// `ORDER BY`. `at(ki)` returns the `ki`-th component.
+enum SortKey {
+    One(OrdVal),
+    Many(Vec<OrdVal>),
+}
+impl SortKey {
+    #[inline]
+    fn at(&self, ki: usize) -> &OrdVal {
+        match self {
+            SortKey::One(v) => v,
+            SortKey::Many(v) => &v[ki],
+        }
+    }
+}
+
+/// A `GROUP BY` key ordered by `Value::total_cmp`, with the single-column case
+/// stored inline — so grouping 500k rows on one column allocates no per-row
+/// `Vec`. All keys in one query share a variant, so `One`/`Many` never mix.
+#[derive(PartialEq, Eq)]
+enum GroupKey {
+    One(OrdVal),
+    Many(Vec<OrdVal>),
+}
+impl GroupKey {
+    #[inline]
+    fn component(&self, i: usize) -> Option<&OrdVal> {
+        match self {
+            GroupKey::One(v) => (i == 0).then_some(v),
+            GroupKey::Many(v) => v.get(i),
+        }
+    }
+}
+impl PartialOrd for GroupKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for GroupKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (GroupKey::One(a), GroupKey::One(b)) => a.cmp(b),
+            (GroupKey::Many(a), GroupKey::Many(b)) => a.cmp(b),
+            // Mixed variants never occur within one query; order deterministically.
+            (GroupKey::One(_), GroupKey::Many(_)) => std::cmp::Ordering::Less,
+            (GroupKey::Many(_), GroupKey::One(_)) => std::cmp::Ordering::Greater,
+        }
+    }
 }
 
 /// A running aggregate accumulator.
@@ -264,27 +562,45 @@ impl Acc {
 fn aggregate_rows(
     projections: &[Projection],
     group_by: &[usize],
-    rows: &[Row],
+    segments: &[Segment],
+    filter: &Option<Expr>,
 ) -> Result<ResultSet, Error> {
-    // Group key → (group row count, per-projection accumulators).
-    let mut groups: BTreeMap<Vec<String>, (i64, Vec<Acc>)> = BTreeMap::new();
-    // Deterministic ordering for grouped output: BTreeMap over the rendered key.
-    for row in rows {
-        let key: Vec<String> = group_by.iter().map(|&i| row_value(row, i).render()).collect();
-        let entry = groups
-            .entry(key)
-            .or_insert_with(|| (0, vec![Acc::new(); projections.len()]));
-        entry.0 += 1;
-        for (i, p) in projections.iter().enumerate() {
-            if let Projection::Agg(_, arg, _) = p {
-                let v = arg.map(|c| row_value(row, c)).unwrap_or(Value::Int(1));
-                entry.1[i].push(&v);
+    // Group key (typed, not rendered) → (group row count, per-projection accs).
+    // BTreeMap over the typed key gives deterministic sorted output without a
+    // separate sort, and — via GroupKey::One — without a per-row allocation on
+    // the common single-column GROUP BY.
+    let mut groups: BTreeMap<GroupKey, (i64, Vec<Acc>)> = BTreeMap::new();
+    for seg in segments {
+        let batch = seg.batch();
+        for row_i in 0..batch.len() {
+            if !passes_at(filter, batch, row_i) {
+                continue;
+            }
+            let key = if group_by.len() == 1 {
+                GroupKey::One(OrdVal(batch_value(batch, group_by[0], row_i)))
+            } else {
+                GroupKey::Many(
+                    group_by
+                        .iter()
+                        .map(|&i| OrdVal(batch_value(batch, i, row_i)))
+                        .collect(),
+                )
+            };
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| (0, vec![Acc::new(); projections.len()]));
+            entry.0 += 1;
+            for (i, p) in projections.iter().enumerate() {
+                if let Projection::Agg(_, arg, _) = p {
+                    let v = arg.map(|c| batch_value(batch, c, row_i)).unwrap_or(Value::Int(1));
+                    entry.1[i].push(&v);
+                }
             }
         }
     }
     // A bare aggregate with no rows still yields one row (COUNT = 0).
     if groups.is_empty() && group_by.is_empty() {
-        groups.insert(Vec::new(), (0, vec![Acc::new(); projections.len()]));
+        groups.insert(GroupKey::Many(Vec::new()), (0, vec![Acc::new(); projections.len()]));
     }
 
     let columns: Vec<String> = projections
@@ -303,12 +619,12 @@ fn aggregate_rows(
                 Projection::Agg(f, arg, _) => accs[i].value(*f, arg.is_none(), group_rows),
                 Projection::Expr(_, _) => {
                     // A grouped column: echo the group key value.
-                    let val = key.get(gi).cloned().unwrap_or_default();
+                    let val = key.component(gi).map(|k| &k.0);
                     gi += 1;
                     if types[i] == '?' {
-                        types[i] = 'I';
+                        types[i] = val.map(|v| v.type_char()).unwrap_or('?');
                     }
-                    rendered.push(val);
+                    rendered.push(val.map(|v| v.render()).unwrap_or_default());
                     continue;
                 }
             };
@@ -327,10 +643,10 @@ fn dedup(rows: &mut Vec<Vec<String>>) {
     rows.retain(|r| seen.insert(r.clone()));
 }
 
-fn sort_rows(rows: &mut [Vec<String>], keys: &[OrderKey], source: &[Row], columns: &[String]) {
+fn sort_rows(rows: &mut [Vec<String>], keys: &[OrderKey], columns: &[String]) {
     // ORDER BY over projected output: match each key expression to an output
     // column when it is a bare column reference, else evaluate against source.
-    let _ = (source, columns);
+    let _ = columns;
     rows.sort_by(|a, b| {
         for (ki, key) in keys.iter().enumerate() {
             // Sort by the corresponding output column position when available.

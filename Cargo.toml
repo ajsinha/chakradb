@@ -15,6 +15,15 @@ publish = false
 # M1+ will introduce arrow-rs, roaring, and a real WAL.
 [dependencies]
 sqlparser = "0.62"
+# DataFusion is the *bought* execution engine (requirements.md §8). It is
+# strictly optional: the core storage/MVCC/SQL crate builds with zero heavy
+# dependencies, and the vectorised executor is opt-in behind `--features
+# datafusion`. M3 evaluates whether the concurrency wedge survives it.
+datafusion = { version = "54", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+[features]
+datafusion = ["dep:datafusion", "dep:tokio"]
 
 [lib]
 name = "chakradb"
@@ -40,4 +49,16 @@ path = "src/bin/m1_bench.rs"
 [[bin]]
 name = "m2-bench"
 path = "src/bin/m2_bench.rs"
+
+[[bin]]
+name = "gate2-bench"
+path = "src/bin/gate2_bench.rs"
+
+# The DataFusion spike (M3): same dataset and queries as gate2-bench, but
+# executed by DataFusion over an MVCC snapshot of ChakraDB. Only built with the
+# `datafusion` feature so the default build stays lean.
+[[bin]]
+name = "df-bench"
+path = "src/bin/df_bench.rs"
+required-features = ["datafusion"]
 

@@ -122,6 +122,21 @@ pub fn row_value(row: &Row, idx: usize) -> Value {
     }
 }
 
+/// Read column `idx` of batch row `i` as a [`Value`], **without materialising a
+/// `Row`**. Only the text column allocates, and only when actually read — this
+/// is what lets the executor evaluate a query in one pass without cloning every
+/// row (see `sql/exec.rs`).
+#[inline]
+pub fn batch_value(batch: &crate::schema::Batch, idx: usize, i: usize) -> Value {
+    match idx {
+        0 => Value::Int(batch.pk[i]),
+        1 => Value::Int(batch.a[i]),
+        2 => Value::Float(batch.b[i]),
+        3 => Value::Text(batch.c[i].clone()),
+        _ => Value::Null,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

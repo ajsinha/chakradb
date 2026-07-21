@@ -287,6 +287,35 @@ impl Part {
         out
     }
 
+    /// Scan visible rows into `out`, cloning only the columns `mask` marks.
+    ///
+    /// Avoids the intermediate clone that [`Part::scan`] produces: rows go
+    /// straight into the caller's batch. Columns the query does not read are
+    /// filled with non-allocating placeholders (see [`Batch::extend_masked`]).
+    pub fn scan_into(&self, snap: Snapshot, out: &mut Batch, mask: [bool; 4]) {
+        if self.is_fully_visible_to(snap) {
+            out.extend_masked(&self.batch, mask);
+            return;
+        }
+        let dv = self.dv.read().unwrap();
+        for i in 0..self.batch.len() {
+            if self.created.at(i) > snap.csn {
+                continue;
+            }
+            if dv.is_deleted_for(i as u32, snap) {
+                continue;
+            }
+            out.pk.push(if mask[0] { self.batch.pk[i] } else { 0 });
+            out.a.push(if mask[1] { self.batch.a[i] } else { 0 });
+            out.b.push(if mask[2] { self.batch.b[i] } else { 0.0 });
+            out.c.push(if mask[3] {
+                self.batch.c[i].clone()
+            } else {
+                String::new()
+            });
+        }
+    }
+
     /// Count of visible rows, without materialising them.
     pub fn visible_count(&self, snap: Snapshot) -> usize {
         if self.is_fully_visible_to(snap) {
