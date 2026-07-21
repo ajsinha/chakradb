@@ -51,6 +51,19 @@ impl std::fmt::Debug for SqlEngine {
     }
 }
 
+/// The key-column index of a `SELECT`'s table, for the point-lookup routing
+/// check. Defaults to 0 for non-selects or unknown tables (harmless — those
+/// don't reach the point-lookup branch).
+#[cfg(feature = "datafusion")]
+fn plan_key_index(backend: &Arc<dyn SqlBackend>, plan: &Plan) -> usize {
+    if let Plan::Select { table, .. } = plan {
+        if let Ok(t) = backend.table(table) {
+            return t.schema().key_index();
+        }
+    }
+    0
+}
+
 impl SqlEngine {
     /// Bind to an in-memory database (no durability).
     pub fn new(db: Arc<Database>) -> Self {
@@ -62,20 +75,42 @@ impl SqlEngine {
         SqlEngine { backend: storage }
     }
 
-    /// Parse, plan, and execute one statement. Column names resolve against the
-    /// live catalog, so each table's declared schema is honoured.
+    /// Parse, plan, and execute one statement — the HTAP router.
     ///
-    /// With the `datafusion` feature, read queries are executed by DataFusion's
-    /// vectorised engine over an MVCC snapshot (joins, windows, and subqueries
-    /// included); writes and DDL stay on the interpreter, which owns the snapshot
-    /// clock and the WAL. Without the feature, everything runs on the interpreter.
+    /// Each statement goes to whichever engine is faster for its shape (the point
+    /// of an HTAP system):
+    /// - Writes, DDL, metadata `COUNT(*)`, and key point lookups → the
+    ///   **interpreter** (owns the WAL and snapshot clock; hits the index funnel).
+    /// - Analytical reads — `GROUP BY`, aggregates, scans, `ORDER BY` — and
+    ///   anything the interpreter can't plan (joins, windows, subqueries) →
+    ///   **DataFusion**'s vectorised engine over an MVCC snapshot.
+    ///
+    /// Without the `datafusion` feature, everything runs on the interpreter (the
+    /// analytical shapes just run slower, and joins/subqueries are rejected).
     pub fn run(&self, sql: &str) -> Result<Outcome, Error> {
-        #[cfg(feature = "datafusion")]
-        if plan::is_query(sql) {
-            return df::execute_query(&*self.backend, sql);
+        match plan_in(sql, &*self.backend) {
+            Ok(plan) => {
+                #[cfg(feature = "datafusion")]
+                {
+                    let key_index = plan_key_index(&self.backend, &plan);
+                    if exec::prefers_vectorized(&plan, key_index) {
+                        return df::execute_query(&*self.backend, sql);
+                    }
+                }
+                execute(&*self.backend, plan)
+            }
+            // The interpreter can't plan this (join / subquery / window). With
+            // DataFusion, hand it the raw SQL; without it, surface the error.
+            Err(e) => {
+                #[cfg(feature = "datafusion")]
+                {
+                    let _ = &e;
+                    return df::execute_query(&*self.backend, sql);
+                }
+                #[cfg(not(feature = "datafusion"))]
+                Err(Error::Sql(e))
+            }
         }
-        let plan = plan_in(sql, &*self.backend).map_err(Error::Sql)?;
-        execute(&*self.backend, plan)
     }
 
     /// Convenience: run a query and return its rows, or an error for

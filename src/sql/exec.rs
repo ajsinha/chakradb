@@ -8,7 +8,7 @@
 //! is to adopt DataFusion behind the existing `scan` boundary, not to hand-tune
 //! this.
 
-use super::expr::Expr;
+use super::expr::{BinaryOp, Expr};
 use super::plan::{AggFn, OrderKey, Plan, Projection};
 use super::value::{batch_value, Value};
 use super::backend::SqlBackend;
@@ -142,6 +142,39 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
             columns: vec![label],
             types: vec!['I'],
             rows: vec![vec![n.to_string()]],
+        });
+    }
+
+    // Point-lookup fast path: `WHERE key = literal` with no grouping/aggregation
+    // resolves through the index funnel (bounds → bloom → binary search) instead
+    // of scanning — O(log n), the transactional read path.
+    if let Some(key) = point_lookup_key(&filter, &group_by, distinct, &projections, t.schema().key_index())
+    {
+        let columns: Vec<String> = projections
+            .iter()
+            .map(|p| match p {
+                Projection::Expr(_, l) | Projection::Agg(_, _, l) => l.clone(),
+            })
+            .collect();
+        let mut types = vec!['?'; projections.len()];
+        let mut rows = Vec::new();
+        if let Some(row) = t.get(&key, snap) {
+            let mut rendered = Vec::with_capacity(projections.len());
+            for (i, p) in projections.iter().enumerate() {
+                if let Projection::Expr(e, _) = p {
+                    let v = e.eval(&row);
+                    if types[i] == '?' {
+                        types[i] = v.type_char();
+                    }
+                    rendered.push(v.render());
+                }
+            }
+            rows.push(rendered);
+        }
+        return Ok(Outcome::Rows {
+            columns,
+            types,
+            rows,
         });
     }
 
@@ -373,6 +406,61 @@ fn is_bare_count_star(
         && !distinct
         && projections.len() == 1
         && matches!(projections[0], Projection::Agg(AggFn::Count, None, _))
+}
+
+/// If this query is a point lookup on the key column — `WHERE key = <literal>`
+/// with no grouping, aggregation, or DISTINCT — return the key value. Such a
+/// query is answered through the index funnel, not a scan.
+fn point_lookup_key(
+    filter: &Option<Expr>,
+    group_by: &[usize],
+    distinct: bool,
+    projections: &[Projection],
+    key_index: usize,
+) -> Option<Value> {
+    if !group_by.is_empty()
+        || distinct
+        || projections.iter().any(|p| matches!(p, Projection::Agg(..)))
+    {
+        return None;
+    }
+    match filter {
+        Some(Expr::Binary(BinaryOp::Eq, l, r)) => match (l.as_ref(), r.as_ref()) {
+            (Expr::Column(i), Expr::Literal(v)) | (Expr::Literal(v), Expr::Column(i))
+                if *i == key_index =>
+            {
+                Some(v.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The HTAP router's verdict: does this plan want the vectorised (DataFusion)
+/// engine? Cheap transactional shapes — metadata `COUNT(*)` and key point
+/// lookups — stay on the interpreter; everything else analytical goes vectorised.
+/// Non-`SELECT` plans (writes, DDL) are never routed away from the interpreter.
+#[cfg(feature = "datafusion")]
+pub(crate) fn prefers_vectorized(plan: &Plan, key_index: usize) -> bool {
+    let Plan::Select {
+        projections,
+        filter,
+        group_by,
+        order_by,
+        distinct,
+        ..
+    } = plan
+    else {
+        return false;
+    };
+    if is_bare_count_star(projections, filter, group_by, order_by, *distinct) {
+        return false;
+    }
+    if point_lookup_key(filter, group_by, *distinct, projections, key_index).is_some() {
+        return false;
+    }
+    true
 }
 
 /// Whether batch row `i` passes an optional predicate, evaluated columnar.
