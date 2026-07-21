@@ -35,6 +35,28 @@ impl Default for TableConfig {
     }
 }
 
+/// A unit of a segment scan (see [`Table::scan_segments`]). Every row it
+/// exposes is visible to the scan's snapshot, so the executor can iterate
+/// `0..batch().len()` without further visibility checks.
+#[derive(Debug)]
+pub enum Segment {
+    /// A fully-visible sealed part, read in place — no copy.
+    Part(Arc<Part>),
+    /// Materialised rows (a partially-visible part's live subset, or L0).
+    Owned(Batch),
+}
+
+impl Segment {
+    /// The columns to evaluate over. All rows are visible.
+    #[inline]
+    pub fn batch(&self) -> &Batch {
+        match self {
+            Segment::Part(p) => p.batch(),
+            Segment::Owned(b) => b,
+        }
+    }
+}
+
 /// Where the live version of a key currently lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Location {
@@ -181,6 +203,59 @@ impl Table {
         }
         out.extend(&l0_rows);
         out
+    }
+
+    /// Scan, cloning only the columns `mask` marks as needed. Used by the query
+    /// executor for projection pushdown — an aggregate that reads only column
+    /// `a` pays nothing for `pk`, `b`, or the `c` String heap.
+    pub fn scan_cols(&self, snap: Snapshot, mask: [bool; 4]) -> Batch {
+        let (parts, l0_rows) = {
+            let inner = self.inner.read().unwrap();
+            (inner.parts.clone(), inner.l0.scan(snap))
+        };
+        Metrics::bump(&self.metrics.scans);
+        let mut out = Batch::new();
+        for p in &parts {
+            if p.is_fully_visible_to(snap) {
+                Metrics::bump(&self.metrics.scan_fast_path);
+            } else {
+                Metrics::bump(&self.metrics.scan_slow_path);
+            }
+            p.scan_into(snap, &mut out, mask);
+        }
+        out.extend_masked(&l0_rows, mask);
+        out
+    }
+
+    /// Scan as a list of **segments** the query executor can evaluate in place.
+    ///
+    /// This is the fast path for analytical queries. A fully-visible part is
+    /// handed back *by reference* (`Segment::Part`) — the executor reads its
+    /// columns directly, with **zero copy** and no combined batch. Only parts
+    /// with partial visibility, plus the L0 buffer, are materialised
+    /// (`Segment::Owned`), and those are the minority. This avoids the dominant
+    /// cost of `scan`/`scan_cols`: concatenating every row into one giant
+    /// `Batch` (and, worse, filling placeholder columns for the pruned ones).
+    pub fn scan_segments(&self, snap: Snapshot) -> Vec<Segment> {
+        let (parts, l0_rows) = {
+            let inner = self.inner.read().unwrap();
+            (inner.parts.clone(), inner.l0.scan(snap))
+        };
+        Metrics::bump(&self.metrics.scans);
+        let mut segs = Vec::with_capacity(parts.len() + 1);
+        for p in parts {
+            if p.is_fully_visible_to(snap) {
+                Metrics::bump(&self.metrics.scan_fast_path);
+                segs.push(Segment::Part(p));
+            } else {
+                Metrics::bump(&self.metrics.scan_slow_path);
+                segs.push(Segment::Owned(p.scan(snap)));
+            }
+        }
+        if !l0_rows.is_empty() {
+            segs.push(Segment::Owned(l0_rows));
+        }
+        segs
     }
 
     /// Number of visible rows, without materialising them.
