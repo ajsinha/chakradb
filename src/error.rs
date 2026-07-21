@@ -10,10 +10,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// Insert of a primary key that already exists.
-    DuplicateKey(i64),
-    /// Update or delete of a primary key that is not live.
-    KeyNotFound(i64),
+    /// Insert of a primary key that already exists (rendered key).
+    DuplicateKey(String),
+    /// Update or delete of a primary key that is not live (rendered key).
+    KeyNotFound(String),
+    /// A row does not match its table's schema (arity or type).
+    SchemaMismatch(String),
     /// Two writers raced for the same row; the loser must retry.
     WriteConflict,
     /// Named table does not exist.
@@ -29,6 +31,7 @@ impl fmt::Display for Error {
         match self {
             Error::DuplicateKey(pk) => write!(f, "duplicate primary key: {pk}"),
             Error::KeyNotFound(pk) => write!(f, "primary key not found: {pk}"),
+            Error::SchemaMismatch(msg) => write!(f, "schema mismatch: {msg}"),
             Error::WriteConflict => write!(f, "write conflict; retry the transaction"),
             Error::TableNotFound(name) => write!(f, "table not found: {name}"),
             Error::TableExists(name) => write!(f, "table already exists: {name}"),
@@ -52,8 +55,8 @@ mod tests {
 
     #[test]
     fn messages_include_context() {
-        assert!(Error::DuplicateKey(42).to_string().contains("42"));
-        assert!(Error::KeyNotFound(7).to_string().contains('7'));
+        assert!(Error::DuplicateKey("42".into()).to_string().contains("42"));
+        assert!(Error::KeyNotFound("7".into()).to_string().contains('7'));
         assert!(Error::TableNotFound("users".into())
             .to_string()
             .contains("users"));
@@ -66,8 +69,8 @@ mod tests {
     #[test]
     fn only_conflicts_are_retryable() {
         assert!(Error::WriteConflict.is_retryable());
-        assert!(!Error::DuplicateKey(1).is_retryable());
-        assert!(!Error::KeyNotFound(1).is_retryable());
+        assert!(!Error::DuplicateKey("1".into()).is_retryable());
+        assert!(!Error::KeyNotFound("1".into()).is_retryable());
         assert!(!Error::TableNotFound("x".into()).is_retryable());
     }
 
@@ -79,7 +82,7 @@ mod tests {
 
     #[test]
     fn equality_works_for_assertions() {
-        assert_eq!(Error::KeyNotFound(5), Error::KeyNotFound(5));
-        assert_ne!(Error::KeyNotFound(5), Error::KeyNotFound(6));
+        assert_eq!(Error::KeyNotFound("5".into()), Error::KeyNotFound("5".into()));
+        assert_ne!(Error::KeyNotFound("5".into()), Error::KeyNotFound("6".into()));
     }
 }

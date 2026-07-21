@@ -11,9 +11,10 @@
 use super::expr::Expr;
 use super::plan::{AggFn, OrderKey, Plan, Projection};
 use super::value::{batch_value, Value};
+use crate::batch::Batch;
 use crate::database::Database;
 use crate::error::Error;
-use crate::schema::{Batch, Row};
+use crate::schema::Row;
 use crate::table::Segment;
 use std::collections::BTreeMap;
 
@@ -72,15 +73,16 @@ fn exec_insert(db: &Database, table: &str, rows: Vec<Row>) -> Result<Outcome, Er
 fn exec_delete(db: &Database, table: &str, filter: Option<Expr>) -> Result<Outcome, Error> {
     let t = db.table(table)?;
     let snap = db.snapshot();
-    let victims: Vec<i64> = t
+    let ki = t.schema().key_index();
+    let victims: Vec<Value> = t
         .scan(snap)
         .iter()
         .filter(|r| passes(&filter, r))
-        .map(|r| r.pk)
+        .map(|r| r.key(ki).clone())
         .collect();
     let mut n = 0;
-    for pk in victims {
-        if t.delete(pk).is_ok() {
+    for key in victims {
+        if t.delete(&key).is_ok() {
             n += 1;
         }
     }
@@ -95,32 +97,20 @@ fn exec_update(
 ) -> Result<Outcome, Error> {
     let t = db.table(table)?;
     let snap = db.snapshot();
+    let schema = t.schema();
     let targets: Vec<Row> = t.scan(snap).iter().filter(|r| passes(&filter, r)).collect();
     let mut n = 0;
     for mut row in targets {
         for (idx, expr) in &sets {
             let v = expr.eval(&row);
-            apply_set(&mut row, *idx, v);
+            let ty = schema.column(*idx).ty;
+            row.values[*idx] = v.coerce(ty).unwrap_or(Value::Null);
         }
         if t.update(row).is_ok() {
             n += 1;
         }
     }
     Ok(Outcome::Affected(n))
-}
-
-fn apply_set(row: &mut Row, idx: usize, v: Value) {
-    match idx {
-        0 => {
-            if let Value::Int(i) = v {
-                row.pk = i;
-            }
-        }
-        1 => row.a = v.as_f64().map(|f| f as i64).unwrap_or(row.a),
-        2 => row.b = v.as_f64().unwrap_or(row.b),
-        3 => row.c = if v.is_null() { String::new() } else { v.render() },
-        _ => {}
-    }
 }
 
 fn exec_select(db: &Database, plan: Plan) -> Result<Outcome, Error> {

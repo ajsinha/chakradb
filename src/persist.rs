@@ -1,24 +1,30 @@
 //! Part serialisation.
 //!
 //! A sealed part is written once and never modified, so its file format can be
-//! simple: a checksummed header followed by column runs, version stamps, and
-//! the deletion vector.
+//! simple: a checksummed summary frame, then the immutable image (version
+//! stamps, the ChakraDB schema, and the columns as an Arrow IPC stream), then
+//! appended tombstone frames.
+//!
+//! The columns are stored as **Arrow IPC** (`docs/dynamic-schema-design.md`):
+//! the open, columnar on-disk format that the M3 spike settled on. The schema is
+//! written alongside because Arrow's own schema does not record which column is
+//! the primary key.
 //!
 //! Deletion vectors *do* change after the part is written. Rather than rewrite
 //! the file, tombstones are appended as framed records after the base image —
 //! the same append-only, checksum-per-record discipline as the WAL, so a torn
 //! append is detected and discarded rather than misread.
 
+use crate::batch::Batch;
 use crate::codec::{frame, unframe, DecodeError, Decoder, Encoder};
 use crate::csn::Csn;
 use crate::io::{File, Io};
 use crate::part::{CreatedCsns, Part};
-use crate::schema::Batch;
 use std::io;
 use std::sync::Arc;
 
 const PART_MAGIC: u32 = 0x4348_4B50; // "CHKP"
-const PART_VERSION: u8 = 2;
+const PART_VERSION: u8 = 3; // v3: Arrow-IPC columns + embedded schema
 const SUMMARY_MAGIC: u32 = 0x4348_4B53; // "CHKS"
 
 const STAMPS_UNIFORM: u8 = 0;
@@ -35,8 +41,8 @@ pub fn encode_summary(part: &Part) -> Vec<u8> {
         .u8(PART_VERSION)
         .u64(part.id())
         .u64(part.num_rows() as u64)
-        .i64(part.min_pk())
-        .i64(part.max_pk())
+        .value(part.min_key())
+        .value(part.max_key())
         .u64(part.created_min())
         .u64(part.created_max());
     frame(e.as_slice())
@@ -53,8 +59,8 @@ fn decode_summary(payload: &[u8]) -> Result<crate::pager::PartSummary, DecodeErr
     Ok(crate::pager::PartSummary {
         id: d.u64()?,
         num_rows: d.u64()? as usize,
-        min_pk: d.i64()?,
-        max_pk: d.i64()?,
+        min_key: d.value()?,
+        max_key: d.value()?,
         created_min: d.u64()?,
         created_max: d.u64()?,
     })
@@ -84,7 +90,7 @@ pub fn read_part_summary(io: &dyn Io, path: &str) -> io::Result<crate::pager::Pa
 pub fn encode_part(part: &Part) -> Vec<u8> {
     let batch = part.batch();
     let n = batch.len();
-    let mut e = Encoder::with_capacity(n * 40 + 64);
+    let mut e = Encoder::with_capacity(n * 24 + 128);
 
     e.u32(PART_MAGIC).u8(PART_VERSION).u64(part.id()).u64(n as u64);
 
@@ -99,19 +105,9 @@ pub fn encode_part(part: &Part) -> Vec<u8> {
         }
     }
 
-    // Columns, run per column so a reader can project without parsing rows.
-    for i in 0..n {
-        e.i64(batch.pk[i]);
-    }
-    for i in 0..n {
-        e.i64(batch.a[i]);
-    }
-    for i in 0..n {
-        e.f64(batch.b[i]);
-    }
-    for i in 0..n {
-        e.str(&batch.c[i]);
-    }
+    // Schema (names, types, key column) then the columns as an Arrow IPC stream.
+    e.schema(batch.schema());
+    e.bytes(&batch.to_ipc());
 
     frame(e.as_slice())
 }
@@ -149,21 +145,11 @@ fn decode_part_image(payload: &[u8]) -> Result<(u64, Batch, CreatedCsns), Decode
         _ => return Err(DecodeError::Malformed("bad stamp encoding")),
     };
 
-    let mut batch = Batch::with_capacity(n);
-    for _ in 0..n {
-        batch.pk.push(d.i64()?);
-    }
-    for _ in 0..n {
-        batch.a.push(d.i64()?);
-    }
-    for _ in 0..n {
-        batch.b.push(d.f64()?);
-    }
-    for _ in 0..n {
-        batch.c.push(d.string()?);
-    }
-    if !batch.is_well_formed() {
-        return Err(DecodeError::Malformed("column length mismatch"));
+    let schema = d.schema()?;
+    let ipc = d.bytes()?;
+    let batch = Batch::from_ipc(&schema, ipc).ok_or(DecodeError::Malformed("bad ipc stream"))?;
+    if batch.len() != n {
+        return Err(DecodeError::Malformed("row count mismatch"));
     }
     Ok((id, batch, created))
 }
@@ -250,6 +236,7 @@ mod tests {
     use crate::csn::Snapshot;
     use crate::io::MemIo;
     use crate::schema::Row;
+    use crate::value::Value;
 
     fn part_of(id: u64, pks: &[i64], csn: Csn) -> Part {
         let batch: Batch = pks
@@ -259,13 +246,25 @@ mod tests {
         Part::new(id, batch, CreatedCsns::Uniform(csn))
     }
 
+    /// The key column of a batch as i64s.
+    fn pks(b: &Batch) -> Vec<i64> {
+        (0..b.len()).map(|i| b.key(i).as_int().unwrap()).collect()
+    }
+    /// The text column (index 3) of a batch.
+    fn texts(b: &Batch) -> Vec<String> {
+        (0..b.len()).map(|i| b.value(3, i).render()).collect()
+    }
+    fn rows(b: &Batch) -> Vec<Row> {
+        b.iter().collect()
+    }
+
     #[test]
     fn roundtrip_preserves_rows_and_id() {
         let p = part_of(7, &[1, 5, 9], 42);
         let got = decode_part_file(&full_image(&p)).unwrap();
         assert_eq!(got.id(), 7);
-        assert_eq!(got.batch().pk, vec![1, 5, 9]);
-        assert_eq!(got.batch().c, p.batch().c);
+        assert_eq!(pks(got.batch()), vec![1, 5, 9]);
+        assert_eq!(texts(got.batch()), texts(p.batch()));
         assert_eq!(got.created_min(), 42);
     }
 
@@ -307,7 +306,7 @@ mod tests {
         .collect();
         let p = Part::new(1, batch.clone(), CreatedCsns::Uniform(1));
         let got = decode_part_file(&full_image(&p)).unwrap();
-        assert_eq!(got.batch(), &batch);
+        assert_eq!(rows(got.batch()), rows(&batch));
     }
 
     #[test]
@@ -317,7 +316,7 @@ mod tests {
         p.mark_deleted(3, 60);
         let got = decode_part_file(&encode_part_with_dv(&p)).unwrap();
         assert_eq!(got.dv_len(), 2);
-        assert_eq!(got.scan(Snapshot::at(60)).pk, vec![1, 3]);
+        assert_eq!(pks(&got.scan(Snapshot::at(60))), vec![1, 3]);
     }
 
     fn full_image(p: &Part) -> Vec<u8> {
@@ -343,7 +342,7 @@ mod tests {
         assert_eq!(got.id(), 2);
         assert_eq!(got.num_rows(), 3);
         assert_eq!(got.dv_len(), 1);
-        assert_eq!(got.scan(Snapshot::at(99)).pk, vec![20, 30]);
+        assert_eq!(pks(&got.scan(Snapshot::at(99))), vec![20, 30]);
     }
 
     #[test]
@@ -355,7 +354,7 @@ mod tests {
         append_tombstones(&*f, &[(2, 41)]).unwrap();
         let got = read_part(&io, "p").unwrap();
         assert_eq!(got.dv_len(), 2);
-        assert_eq!(got.scan(Snapshot::at(50)).pk, vec![2]);
+        assert_eq!(pks(&got.scan(Snapshot::at(50))), vec![2]);
     }
 
     #[test]
@@ -397,7 +396,7 @@ mod tests {
     #[test]
     fn bad_magic_is_rejected() {
         let mut e = Encoder::new();
-        e.u32(0xDEAD_BEEF).u8(2).u64(0).u64(0);
+        e.u32(0xDEAD_BEEF).u8(3).u64(0).u64(0);
         assert!(decode_part_file(&frame(e.as_slice())).is_err());
     }
 
@@ -409,8 +408,8 @@ mod tests {
         let s = read_part_summary(&io, "big").unwrap();
         assert_eq!(s.id, 9);
         assert_eq!(s.num_rows, 5_000);
-        assert_eq!(s.min_pk, 0);
-        assert_eq!(s.max_pk, 4_999);
+        assert_eq!(s.min_key, Value::Int(0));
+        assert_eq!(s.max_key, Value::Int(4_999));
         assert_eq!(s.created_min, 42);
         assert_eq!(s.created_max, 42);
     }
@@ -450,14 +449,17 @@ mod tests {
     #[test]
     fn lookups_work_after_reload() {
         let io = MemIo::new();
-        let pks: Vec<i64> = (0..5_000).map(|i| i * 7).collect();
-        let p = part_of(4, &pks, 3);
+        let pks_v: Vec<i64> = (0..5_000).map(|i| i * 7).collect();
+        let p = part_of(4, &pks_v, 3);
         write_part(&io, "big", &p).unwrap();
         let got = read_part(&io, "big").unwrap();
         let snap = Snapshot::at(100);
-        for &pk in pks.iter().step_by(53) {
-            assert!(got.lookup(pk, snap).ordinal().is_some(), "lost {pk}");
+        for &pk in pks_v.iter().step_by(53) {
+            assert!(
+                got.lookup(&Value::Int(pk), snap).ordinal().is_some(),
+                "lost {pk}"
+            );
         }
-        assert!(got.lookup(5, snap).ordinal().is_none());
+        assert!(got.lookup(&Value::Int(5), snap).ordinal().is_none());
     }
 }

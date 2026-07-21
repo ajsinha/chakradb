@@ -17,9 +17,11 @@
 //! collapses them to uniform once no snapshot can tell them apart, after which
 //! scans do zero per-row visibility work (§5.3). M0-4 measures that.
 
+use crate::batch::Batch;
 use crate::csn::{Csn, Snapshot};
 use crate::delete_vector::DeleteVector;
-use crate::schema::Batch;
+use crate::value::Value;
+use std::cmp::Ordering;
 use std::sync::RwLock;
 
 /// How a part stores row creation stamps.
@@ -104,28 +106,28 @@ pub struct Part {
     created: CreatedCsns,
     created_min: Csn,
     created_max: Csn,
-    min_pk: i64,
-    max_pk: i64,
+    /// Key bounds (of any type), `Null` when the part is empty.
+    min_key: Value,
+    max_key: Value,
     bloom: crate::bloom::BloomFilter,
     dv: RwLock<DeleteVector>,
 }
 
 impl Part {
-    /// Build a part from a PK-sorted batch.
+    /// Build a part from a key-sorted batch.
     ///
-    /// Panics if the batch is not sorted or is malformed — these are internal
-    /// invariants, and violating them silently would corrupt lookups.
+    /// Panics if the batch is not sorted by its key column — an internal
+    /// invariant whose violation would corrupt lookups.
     pub fn new(id: u64, batch: Batch, created: CreatedCsns) -> Self {
-        assert!(batch.is_well_formed(), "part {id}: malformed batch");
-        assert!(batch.is_sorted_by_pk(), "part {id}: batch not sorted by pk");
+        assert!(batch.is_sorted_by_key(), "part {id}: batch not sorted by key");
         if let CreatedCsns::PerRow(v) = &created {
             assert_eq!(v.len(), batch.len(), "part {id}: csn/row length mismatch");
         }
 
-        let (min_pk, max_pk) = if batch.is_empty() {
-            (i64::MAX, i64::MIN)
+        let (min_key, max_key) = if batch.is_empty() {
+            (Value::Null, Value::Null)
         } else {
-            (batch.pk[0], batch.pk[batch.len() - 1])
+            (batch.key(0), batch.key(batch.len() - 1))
         };
 
         let (created_min, created_max) = match &created {
@@ -136,7 +138,7 @@ impl Part {
             ),
         };
 
-        let bloom = crate::bloom::BloomFilter::build(&batch.pk);
+        let bloom = crate::bloom::BloomFilter::build_values(&batch.keys());
 
         Part {
             id,
@@ -144,8 +146,8 @@ impl Part {
             created,
             created_min,
             created_max,
-            min_pk,
-            max_pk,
+            min_key,
+            max_key,
             bloom,
             dv: RwLock::new(DeleteVector::new()),
         }
@@ -160,11 +162,11 @@ impl Part {
     pub fn is_empty(&self) -> bool {
         self.batch.is_empty()
     }
-    pub fn min_pk(&self) -> i64 {
-        self.min_pk
+    pub fn min_key(&self) -> &Value {
+        &self.min_key
     }
-    pub fn max_pk(&self) -> i64 {
-        self.max_pk
+    pub fn max_key(&self) -> &Value {
+        &self.max_key
     }
     pub fn created_min(&self) -> Csn {
         self.created_min
@@ -186,17 +188,20 @@ impl Part {
     }
 
     /// The four-stage lookup funnel, cheapest filter first (§5.2).
-    pub fn lookup(&self, pk: i64, snap: Snapshot) -> LookupResult {
+    pub fn lookup(&self, key: &Value, snap: Snapshot) -> LookupResult {
         // Stage 1: bounds. Pure metadata, no probing.
-        if self.batch.is_empty() || pk < self.min_pk || pk > self.max_pk {
+        if self.batch.is_empty()
+            || key.total_cmp(&self.min_key).is_lt()
+            || key.total_cmp(&self.max_key).is_gt()
+        {
             return LookupResult::OutOfBounds;
         }
         // Stage 2: Bloom filter.
-        if !self.bloom.maybe_contains(pk) {
+        if !self.bloom.maybe_contains_value(key) {
             return LookupResult::BloomMiss;
         }
         // Stage 3: ordered seek. The ordinal *is* the row offset.
-        let hit = match self.batch.pk.binary_search(&pk) {
+        let hit = match self.search_key(key) {
             Ok(i) => i,
             Err(_) => return LookupResult::NotPresent,
         };
@@ -220,16 +225,32 @@ impl Part {
         LookupResult::NotVisible
     }
 
-    /// Inclusive `(lo, hi)` bounds of the run of rows sharing `self.batch.pk[i]`.
+    /// Binary-search the sorted key column for `key` (via `total_cmp`).
+    #[inline]
+    fn search_key(&self, key: &Value) -> std::result::Result<usize, usize> {
+        let mut lo = 0;
+        let mut hi = self.batch.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.batch.key(mid).total_cmp(key) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => return Ok(mid),
+            }
+        }
+        Err(lo)
+    }
+
+    /// Inclusive `(lo, hi)` bounds of the run of rows sharing the key at `i`.
     #[inline]
     fn equal_key_run(&self, i: usize) -> (usize, usize) {
-        let key = self.batch.pk[i];
+        let key = self.batch.key(i);
         let mut lo = i;
-        while lo > 0 && self.batch.pk[lo - 1] == key {
+        while lo > 0 && self.batch.key(lo - 1).total_cmp(&key).is_eq() {
             lo -= 1;
         }
         let mut hi = i;
-        while hi + 1 < self.batch.len() && self.batch.pk[hi + 1] == key {
+        while hi + 1 < self.batch.len() && self.batch.key(hi + 1).total_cmp(&key).is_eq() {
             hi += 1;
         }
         (lo, hi)
@@ -267,53 +288,19 @@ impl Part {
 
     /// Rows visible to `snap`.
     ///
-    /// Takes the zero-work fast path when possible, cloning the underlying
-    /// batch wholesale rather than testing rows individually.
+    /// Takes the zero-work fast path when possible, cloning the underlying batch
+    /// wholesale (an Arc-cheap Arrow clone) rather than testing rows one by one.
+    /// The partial path selects visible ordinals with a columnar `take`.
     pub fn scan(&self, snap: Snapshot) -> Batch {
         if self.is_fully_visible_to(snap) {
             return self.batch.clone();
         }
         let dv = self.dv.read().unwrap();
-        let mut out = Batch::with_capacity(self.batch.len());
-        for i in 0..self.batch.len() {
-            if self.created.at(i) > snap.csn {
-                continue;
-            }
-            if dv.is_deleted_for(i as u32, snap) {
-                continue;
-            }
-            out.push(&self.batch.row(i));
-        }
-        out
-    }
-
-    /// Scan visible rows into `out`, cloning only the columns `mask` marks.
-    ///
-    /// Avoids the intermediate clone that [`Part::scan`] produces: rows go
-    /// straight into the caller's batch. Columns the query does not read are
-    /// filled with non-allocating placeholders (see [`Batch::extend_masked`]).
-    pub fn scan_into(&self, snap: Snapshot, out: &mut Batch, mask: [bool; 4]) {
-        if self.is_fully_visible_to(snap) {
-            out.extend_masked(&self.batch, mask);
-            return;
-        }
-        let dv = self.dv.read().unwrap();
-        for i in 0..self.batch.len() {
-            if self.created.at(i) > snap.csn {
-                continue;
-            }
-            if dv.is_deleted_for(i as u32, snap) {
-                continue;
-            }
-            out.pk.push(if mask[0] { self.batch.pk[i] } else { 0 });
-            out.a.push(if mask[1] { self.batch.a[i] } else { 0 });
-            out.b.push(if mask[2] { self.batch.b[i] } else { 0.0 });
-            out.c.push(if mask[3] {
-                self.batch.c[i].clone()
-            } else {
-                String::new()
-            });
-        }
+        let visible: Vec<u32> = (0..self.batch.len())
+            .filter(|&i| self.created.at(i) <= snap.csn && !dv.is_deleted_for(i as u32, snap))
+            .map(|i| i as u32)
+            .collect();
+        self.batch.take(&visible)
     }
 
     /// Count of visible rows, without materialising them.
@@ -399,21 +386,26 @@ mod tests {
     #[test]
     fn bounds_are_derived_from_sorted_keys() {
         let p = Part::new(1, sorted_batch(&[3, 7, 19]), CreatedCsns::Uniform(1));
-        assert_eq!(p.min_pk(), 3);
-        assert_eq!(p.max_pk(), 19);
+        assert_eq!(p.min_key(), &Value::Int(3));
+        assert_eq!(p.max_key(), &Value::Int(19));
         assert_eq!(p.created_min(), 1);
         assert_eq!(p.created_max(), 1);
     }
 
     #[test]
-    fn empty_part_has_inverted_bounds() {
+    fn empty_part_rejects_every_lookup() {
         let p = Part::new(1, Batch::new(), CreatedCsns::Uniform(1));
         assert!(p.is_empty());
-        assert!(p.min_pk() > p.max_pk(), "empty bounds must reject everything");
+        assert!(p.min_key().is_null(), "empty bounds are Null");
+        let snap = Snapshot { csn: 100 };
+        assert!(matches!(
+            p.lookup(&Value::Int(5), snap),
+            LookupResult::OutOfBounds
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "not sorted by pk")]
+    #[should_panic(expected = "not sorted by key")]
     fn unsorted_batch_is_rejected() {
         let b: Batch = vec![Row::new(5, 0, 0.0, ""), Row::new(1, 0, 0.0, "")]
             .into_iter()

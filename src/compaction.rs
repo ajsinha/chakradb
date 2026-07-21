@@ -21,10 +21,12 @@
 //! from parts that are being merged, because those deletions are carried
 //! forward through the ordinal mapping rather than lost.
 
+use crate::batch::Batch;
 use crate::csn::{Csn, NEVER_DELETED};
 use crate::metrics::Metrics;
 use crate::part::{CreatedCsns, Part};
-use crate::schema::Batch;
+use crate::schema::Row;
+use crate::value::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -112,8 +114,9 @@ pub fn plan_merge(
         return None;
     }
 
-    // (pk, created, deleted, source part id, source ordinal)
-    let mut rows: Vec<(i64, Csn, Csn, u64, u32)> = Vec::new();
+    // (key, created, deleted, source part id, source ordinal)
+    let schema = parts[0].batch().schema().clone();
+    let mut rows: Vec<(Value, Csn, Csn, u64, u32)> = Vec::new();
     let mut total_source_rows = 0usize;
 
     for part in parts {
@@ -127,7 +130,7 @@ pub fn plan_merge(
                 continue;
             }
             rows.push((
-                batch.pk[ord],
+                batch.key(ord),
                 part.created_at(ord),
                 deleted,
                 part.id(),
@@ -138,24 +141,25 @@ pub fn plan_merge(
 
     let rows_reclaimed = total_source_rows.saturating_sub(rows.len());
 
-    // Sort by (pk, created) so the output satisfies Part's invariants.
-    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    // Sort by (key, created) so the output satisfies Part's invariants.
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
 
     let by_id: HashMap<u64, &Arc<Part>> = parts.iter().map(|p| (p.id(), p)).collect();
-    let mut batch = Batch::with_capacity(rows.len());
+    let mut merged_rows: Vec<Row> = Vec::with_capacity(rows.len());
     let mut created = Vec::with_capacity(rows.len());
     let mut deletions = Vec::new();
     let mut mapping = HashMap::with_capacity(rows.len());
 
-    for (out_ord, &(_, c, d, src_id, src_ord)) in rows.iter().enumerate() {
-        let src = by_id[&src_id];
-        batch.push(&src.batch().row(src_ord as usize));
-        created.push(c);
-        if d != NEVER_DELETED {
-            deletions.push((out_ord as u32, d));
+    for (out_ord, (_, c, d, src_id, src_ord)) in rows.iter().enumerate() {
+        let src = by_id[src_id];
+        merged_rows.push(src.batch().row(*src_ord as usize));
+        created.push(*c);
+        if *d != NEVER_DELETED {
+            deletions.push((out_ord as u32, *d));
         }
-        mapping.insert((src_id, src_ord), out_ord as u32);
+        mapping.insert((*src_id, *src_ord), out_ord as u32);
     }
+    let batch = Batch::from_rows(&schema, &merged_rows);
 
     let mut merged = Part::with_deletions(new_part_id, batch, CreatedCsns::PerRow(created), &deletions);
     // Version-metadata GC: collapse per-row stamps when indistinguishable.
@@ -230,6 +234,11 @@ mod tests {
         Arc::new(Part::new(id, batch, CreatedCsns::Uniform(csn)))
     }
 
+    /// The key column of a part's batch as i64s.
+    fn pks(b: &Batch) -> Vec<i64> {
+        (0..b.len()).map(|i| b.key(i).as_int().unwrap()).collect()
+    }
+
     fn run(parts: &mut Vec<Arc<Part>>, next_id: u64, horizon: Csn) -> usize {
         let snapshot = parts.clone();
         match plan_merge(&snapshot, next_id, horizon, horizon) {
@@ -286,8 +295,8 @@ mod tests {
         let mut parts = vec![part(0, &[5, 9], 1), part(1, &[1, 7], 1)];
         assert_eq!(run(&mut parts, 2, 10), 2);
         assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].batch().pk, vec![1, 5, 7, 9]);
-        assert!(parts[0].batch().is_sorted_by_pk());
+        assert_eq!(pks(parts[0].batch()), vec![1, 5, 7, 9]);
+        assert!(parts[0].batch().is_sorted_by_key());
     }
 
     #[test]
@@ -296,7 +305,7 @@ mod tests {
         a.mark_deleted(1, 5);
         let mut parts = vec![a, part(1, &[4], 1)];
         run(&mut parts, 2, 10);
-        assert_eq!(parts[0].batch().pk, vec![1, 3, 4]);
+        assert_eq!(pks(parts[0].batch()), vec![1, 3, 4]);
     }
 
     #[test]
@@ -305,7 +314,7 @@ mod tests {
         a.mark_deleted(1, 100);
         let mut parts = vec![a, part(1, &[3], 1)];
         run(&mut parts, 2, 10);
-        assert!(parts[0].batch().pk.contains(&2));
+        assert!(pks(parts[0].batch()).contains(&2));
     }
 
     #[test]
@@ -340,11 +349,11 @@ mod tests {
         assert_eq!(apply_plan(&mut parts, plan, &Metrics::new()), 2);
         let merged = &parts[0];
         assert!(
-            merged.lookup(2, crate::csn::Snapshot::at(60)).ordinal().is_none(),
+            merged.lookup(&Value::Int(2), crate::csn::Snapshot::at(60)).ordinal().is_none(),
             "delete issued during the merge was lost"
         );
         assert!(
-            merged.lookup(2, crate::csn::Snapshot::at(55)).ordinal().is_some(),
+            merged.lookup(&Value::Int(2), crate::csn::Snapshot::at(55)).ordinal().is_some(),
             "older snapshot must still see it"
         );
     }
@@ -390,9 +399,9 @@ mod tests {
     fn repeated_merge_is_content_stable() {
         let mut parts = vec![part(0, &[1], 1), part(1, &[2], 1)];
         run(&mut parts, 2, 10);
-        let before = parts[0].batch().pk.clone();
+        let before = pks(parts[0].batch());
         run(&mut parts, 3, 10);
-        assert_eq!(parts[0].batch().pk, before);
+        assert_eq!(pks(parts[0].batch()), before);
         assert_eq!(parts.len(), 1);
     }
 }

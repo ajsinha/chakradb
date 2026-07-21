@@ -44,6 +44,29 @@ impl BloomFilter {
         f
     }
 
+    /// Build from any-type keys. Each [`Value`] is reduced to a 64-bit seed and
+    /// then hashed by the same machinery as integer keys, so an integer key
+    /// column behaves bit-for-bit as before. A key column has one type, so a
+    /// value and its probe always reduce the same way — no false negatives.
+    pub fn build_values(keys: &[crate::value::Value]) -> Self {
+        let mut f = Self::with_capacity(keys.len());
+        for k in keys {
+            f.insert(value_seed(k));
+        }
+        f
+    }
+
+    /// Insert an any-type key.
+    pub fn insert_value(&mut self, key: &crate::value::Value) {
+        self.insert(value_seed(key));
+    }
+
+    /// Probe an any-type key. `false` means definitely absent.
+    #[inline]
+    pub fn maybe_contains_value(&self, key: &crate::value::Value) -> bool {
+        self.maybe_contains(value_seed(key))
+    }
+
     pub fn insert(&mut self, key: i64) {
         let (h1, h2) = Self::hashes(key);
         for i in 0..self.num_hashes {
@@ -105,9 +128,49 @@ impl BloomFilter {
     }
 }
 
+/// Reduce a key value to a 64-bit seed for hashing. `Int` maps to itself so the
+/// integer path is unchanged; other types get a deterministic reduction.
+fn value_seed(v: &crate::value::Value) -> i64 {
+    use crate::value::Value;
+    match v {
+        Value::Int(i) => *i,
+        Value::Bool(b) => *b as i64,
+        Value::Float(f) => f.to_bits() as i64,
+        Value::Text(s) => {
+            // FNV-1a over the bytes.
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            for &byte in s.as_bytes() {
+                h ^= byte as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h as i64
+        }
+        Value::Null => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::Value;
+
+    #[test]
+    fn value_keys_have_no_false_negatives() {
+        let keys: Vec<Value> = (0..2000)
+            .map(|i| Value::Text(format!("user-{i}")))
+            .collect();
+        let f = BloomFilter::build_values(&keys);
+        for k in &keys {
+            assert!(f.maybe_contains_value(k), "false negative on {k:?}");
+        }
+    }
+
+    #[test]
+    fn int_value_path_matches_i64_path() {
+        let a = BloomFilter::build(&[1, 2, 3]);
+        let b = BloomFilter::build_values(&[Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(a.bits, b.bits, "Int keys must hash identically to i64 keys");
+    }
 
     #[test]
     fn empty_filter_contains_nothing() {
