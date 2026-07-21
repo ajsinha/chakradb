@@ -19,11 +19,13 @@
 //! to hand-tune this. The value here is the correctness surface and the
 //! conformance harness it enables.
 
+pub mod backend;
 pub mod exec;
 pub mod expr;
 pub mod plan;
 pub mod value;
 
+pub use backend::SqlBackend;
 pub use exec::{execute, Outcome};
 pub use plan::{plan, plan_in, Plan};
 pub use plan::{AggFn, Projection};
@@ -31,24 +33,38 @@ pub use value::Value;
 
 use crate::database::Database;
 use crate::error::Error;
+use crate::storage::Storage;
 use std::sync::Arc;
 
-/// A SQL front-end bound to a database.
-#[derive(Debug)]
+/// A SQL front-end bound to a catalog. The catalog is either an in-memory
+/// [`Database`] or a durable [`Storage`]; with the latter, SQL writes are logged
+/// to the WAL and survive a crash.
 pub struct SqlEngine {
-    db: Arc<Database>,
+    backend: Arc<dyn SqlBackend>,
+}
+
+impl std::fmt::Debug for SqlEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlEngine").finish_non_exhaustive()
+    }
 }
 
 impl SqlEngine {
+    /// Bind to an in-memory database (no durability).
     pub fn new(db: Arc<Database>) -> Self {
-        SqlEngine { db }
+        SqlEngine { backend: db }
+    }
+
+    /// Bind to durable storage: SQL writes are WAL-logged and crash-safe.
+    pub fn durable(storage: Arc<Storage>) -> Self {
+        SqlEngine { backend: storage }
     }
 
     /// Parse, plan, and execute one statement. Column names resolve against the
     /// live catalog, so each table's declared schema is honoured.
     pub fn run(&self, sql: &str) -> Result<Outcome, Error> {
-        let plan = plan_in(sql, &self.db).map_err(Error::Sql)?;
-        execute(&self.db, plan)
+        let plan = plan_in(sql, &*self.backend).map_err(Error::Sql)?;
+        execute(&*self.backend, plan)
     }
 
     /// Convenience: run a query and return its rows, or an error for
@@ -60,8 +76,9 @@ impl SqlEngine {
         }
     }
 
-    pub fn database(&self) -> &Arc<Database> {
-        &self.db
+    /// The backend this engine writes through.
+    pub fn backend(&self) -> &Arc<dyn SqlBackend> {
+        &self.backend
     }
 }
 

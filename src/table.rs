@@ -161,6 +161,43 @@ impl Table {
         Ok(csn)
     }
 
+    /// Insert, returning the stored row (with any assigned `_rowid`) so a durable
+    /// caller can log to the WAL exactly what was applied. Otherwise identical to
+    /// [`Table::insert`].
+    pub fn insert_returning(&self, mut row: Row) -> Result<(Csn, Row)> {
+        let mut inner = self.inner.write().unwrap();
+        self.assign_rowid(&mut inner, &mut row);
+        let key = row.key(self.key_index()).clone();
+        let snap = self.csn.snapshot();
+        if Self::locate(&inner, &key, snap, &self.metrics).is_some() {
+            return Err(Error::DuplicateKey(key.render()));
+        }
+        let csn = self.csn.allocate();
+        inner.l0.insert(row.clone(), csn);
+        Metrics::bump(&self.metrics.inserts);
+        self.maybe_seal_locked(&mut inner);
+        Ok((csn, row))
+    }
+
+    /// Upsert, returning the stored row (with any assigned `_rowid`).
+    pub fn upsert_returning(&self, mut row: Row) -> Result<(Csn, Row)> {
+        let mut inner = self.inner.write().unwrap();
+        self.assign_rowid(&mut inner, &mut row);
+        let key = row.key(self.key_index()).clone();
+        let snap = self.csn.snapshot();
+        let existing = Self::locate(&inner, &key, snap, &self.metrics);
+        let csn = self.csn.allocate();
+        if let Some(loc) = existing {
+            Self::tombstone(&mut inner, loc, csn)?;
+            Metrics::bump(&self.metrics.updates);
+        } else {
+            Metrics::bump(&self.metrics.inserts);
+        }
+        inner.l0.insert(row.clone(), csn);
+        self.maybe_seal_locked(&mut inner);
+        Ok((csn, row))
+    }
+
     /// Insert or replace.
     pub fn upsert(&self, mut row: Row) -> Result<Csn> {
         let mut inner = self.inner.write().unwrap();

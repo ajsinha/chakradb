@@ -11,8 +11,8 @@
 use super::expr::Expr;
 use super::plan::{AggFn, OrderKey, Plan, Projection};
 use super::value::{batch_value, Value};
+use super::backend::SqlBackend;
 use crate::batch::Batch;
-use crate::database::Database;
 use crate::error::Error;
 use crate::schema::Row;
 use crate::table::Segment;
@@ -43,36 +43,35 @@ impl Outcome {
     }
 }
 
-/// Execute a plan against a database.
-pub fn execute(db: &Database, plan: Plan) -> Result<Outcome, Error> {
+/// Execute a plan against a catalog (in-memory or durable).
+pub fn execute(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     match plan {
         Plan::CreateTable { name, schema } => {
-            db.create_table_schema(&name, schema)?;
+            be.create_table(&name, schema)?;
             Ok(Outcome::Affected(0))
         }
-        Plan::Insert { table, rows } => exec_insert(db, &table, rows),
-        Plan::Delete { table, filter } => exec_delete(db, &table, filter),
+        Plan::Insert { table, rows } => exec_insert(be, &table, rows),
+        Plan::Delete { table, filter } => exec_delete(be, &table, filter),
         Plan::Update {
             table,
             sets,
             filter,
-        } => exec_update(db, &table, sets, filter),
-        Plan::Select { .. } => exec_select(db, plan),
+        } => exec_update(be, &table, sets, filter),
+        Plan::Select { .. } => exec_select(be, plan),
     }
 }
 
-fn exec_insert(db: &Database, table: &str, rows: Vec<Row>) -> Result<Outcome, Error> {
-    let t = db.table(table)?;
+fn exec_insert(be: &dyn SqlBackend, table: &str, rows: Vec<Row>) -> Result<Outcome, Error> {
     let n = rows.len();
     for row in rows {
-        t.insert(row)?;
+        be.insert(table, row)?;
     }
     Ok(Outcome::Affected(n))
 }
 
-fn exec_delete(db: &Database, table: &str, filter: Option<Expr>) -> Result<Outcome, Error> {
-    let t = db.table(table)?;
-    let snap = db.snapshot();
+fn exec_delete(be: &dyn SqlBackend, table: &str, filter: Option<Expr>) -> Result<Outcome, Error> {
+    let t = be.table(table)?;
+    let snap = be.snapshot();
     let ki = t.schema().key_index();
     let victims: Vec<Value> = t
         .scan(snap)
@@ -82,7 +81,7 @@ fn exec_delete(db: &Database, table: &str, filter: Option<Expr>) -> Result<Outco
         .collect();
     let mut n = 0;
     for key in victims {
-        if t.delete(&key).is_ok() {
+        if be.delete(table, &key).is_ok() {
             n += 1;
         }
     }
@@ -90,14 +89,14 @@ fn exec_delete(db: &Database, table: &str, filter: Option<Expr>) -> Result<Outco
 }
 
 fn exec_update(
-    db: &Database,
+    be: &dyn SqlBackend,
     table: &str,
     sets: Vec<(usize, Expr)>,
     filter: Option<Expr>,
 ) -> Result<Outcome, Error> {
-    let t = db.table(table)?;
-    let snap = db.snapshot();
-    let schema = t.schema();
+    let t = be.table(table)?;
+    let snap = be.snapshot();
+    let schema = t.schema().clone();
     let targets: Vec<Row> = t.scan(snap).iter().filter(|r| passes(&filter, r)).collect();
     let mut n = 0;
     for mut row in targets {
@@ -106,14 +105,14 @@ fn exec_update(
             let ty = schema.column(*idx).ty;
             row.values[*idx] = v.coerce(ty).unwrap_or(Value::Null);
         }
-        if t.update(row).is_ok() {
+        if be.update(table, row).is_ok() {
             n += 1;
         }
     }
     Ok(Outcome::Affected(n))
 }
 
-fn exec_select(db: &Database, plan: Plan) -> Result<Outcome, Error> {
+fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     let Plan::Select {
         table,
         projections,
@@ -127,8 +126,8 @@ fn exec_select(db: &Database, plan: Plan) -> Result<Outcome, Error> {
         unreachable!()
     };
 
-    let t = db.table(&table)?;
-    let snap = db.snapshot();
+    let t = be.table(&table)?;
+    let snap = be.snapshot();
 
     // Fast path: `SELECT COUNT(*) FROM t` with no filter answers from metadata,
     // the way DuckDB does — no scan at all. This is the single most common
@@ -669,6 +668,7 @@ fn output_index(key: &OrderKey, projections: &[Projection], fallback: usize) -> 
 mod tests {
     use super::super::plan::plan;
     use super::*;
+    use crate::database::Database;
 
     fn db_with(rows: &[(i64, i64, f64, &str)]) -> Database {
         let db = Database::new();

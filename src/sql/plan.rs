@@ -12,7 +12,6 @@
 
 use super::expr::{BinaryOp, Expr, UnaryOp};
 use super::value::Value;
-use crate::database::Database;
 use crate::schema::{ColumnDef, Row, Schema};
 use crate::value::DataType;
 use sqlparser::ast as sa;
@@ -94,10 +93,10 @@ pub fn plan(sql: &str) -> Result<Plan, String> {
     plan_with(sql, &|_| Some(Schema::default_schema()))
 }
 
-/// Parse and plan against a live database's catalog, so column names resolve to
-/// each table's actual schema.
-pub fn plan_in(sql: &str, db: &Database) -> Result<Plan, String> {
-    plan_with(sql, &|name| db.table(name).ok().map(|t| t.schema().clone()))
+/// Parse and plan against a live catalog, so column names resolve to each
+/// table's actual schema.
+pub fn plan_in(sql: &str, be: &dyn crate::sql::SqlBackend) -> Result<Plan, String> {
+    plan_with(sql, &|name| be.table(name).ok().map(|t| t.schema().clone()))
 }
 
 fn plan_with(sql: &str, schema_for: SchemaFor) -> Result<Plan, String> {

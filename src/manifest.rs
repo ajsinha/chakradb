@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 pub struct TableMeta {
     pub id: u32,
     pub name: String,
+    /// The table's schema, so recovery rebuilds it with the right shape.
+    pub schema: crate::schema::Schema,
     /// Part ids, newest first — the order lookups traverse.
     pub part_ids: Vec<u64>,
     pub next_part_id: u64,
@@ -48,6 +50,7 @@ impl ManifestState {
         for t in &self.tables {
             e.u32(t.id)
                 .str(&t.name)
+                .schema(&t.schema)
                 .u64(t.next_part_id)
                 .u32(t.part_ids.len() as u32);
             for &p in &t.part_ids {
@@ -66,6 +69,7 @@ impl ManifestState {
         for _ in 0..n {
             let id = d.u32()?;
             let name = d.string()?;
+            let schema = d.schema()?;
             let next_part_id = d.u64()?;
             let pn = d.u32()? as usize;
             let mut part_ids = Vec::with_capacity(pn);
@@ -75,6 +79,7 @@ impl ManifestState {
             tables.push(TableMeta {
                 id,
                 name,
+                schema,
                 part_ids,
                 next_part_id,
             });
@@ -181,6 +186,7 @@ mod tests {
                 .map(|i| TableMeta {
                     id: i,
                     name: format!("t{i}"),
+                    schema: crate::schema::Schema::default_schema(),
                     part_ids: vec![i as u64 * 10, i as u64 * 10 + 1],
                     next_part_id: 100 + i as u64,
                 })
@@ -300,6 +306,7 @@ mod tests {
         s.tables.push(TableMeta {
             id: 1,
             name: "テーブル".to_string(),
+            schema: crate::schema::Schema::default_schema(),
             part_ids: vec![],
             next_part_id: 0,
         });
@@ -317,6 +324,7 @@ mod tests {
             s.tables.push(TableMeta {
                 id: i,
                 name: format!("table_{i}"),
+                schema: crate::schema::Schema::default_schema(),
                 part_ids: (0..50).map(|p| p as u64).collect(),
                 next_part_id: 50,
             });

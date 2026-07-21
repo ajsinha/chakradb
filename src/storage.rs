@@ -80,7 +80,7 @@ impl Storage {
         let mut table_ids = HashMap::new();
         for meta in &state.tables {
             let t = db
-                .create_table(&meta.name)
+                .create_table_schema(&meta.name, meta.schema.clone())
                 .map_err(|e| stdio::Error::new(stdio::ErrorKind::InvalidData, e.to_string()))?;
             table_ids.insert(meta.name.clone(), meta.id);
             // FR-06b: read only each part's summary frame — a bounded read —
@@ -287,15 +287,22 @@ impl Storage {
         self.wal.set_mode(d);
     }
 
-    /// Create a table and record it durably.
+    /// Create a table with the default schema and record it durably.
     pub fn create_table(&self, name: &str) -> Result<()> {
-        self.db.create_table(name)?;
+        self.create_table_schema(name, crate::schema::Schema::default_schema())
+    }
+
+    /// Create a table with an explicit schema and record it durably, so recovery
+    /// rebuilds it with the right shape.
+    pub fn create_table_schema(&self, name: &str, schema: crate::schema::Schema) -> Result<()> {
+        self.db.create_table_schema(name, schema.clone())?;
         let mut st = self.state.lock().unwrap();
         let id = st.next_table_id;
         st.next_table_id += 1;
         st.tables.push(TableMeta {
             id,
             name: name.to_string(),
+            schema,
             part_ids: Vec::new(),
             next_part_id: 0,
         });
@@ -334,17 +341,18 @@ impl Storage {
         Ok(())
     }
 
-    /// Insert, logging before acknowledging.
+    /// Insert, logging before acknowledging. Logs the *stored* row so a
+    /// synthesised `_rowid` is captured for replay.
     pub fn insert(&self, table: &str, row: Row) -> Result<Csn> {
         self.warm();
         let id = self.table_id(table)?;
         let t = self.db.table(table)?;
         self.throttle(&t);
-        let csn = t.insert(row.clone())?;
+        let (csn, stored) = t.insert_returning(row)?;
         self.log(WalRecord::Insert {
             table: id,
             csn,
-            row,
+            row: stored,
         })?;
         Ok(csn)
     }
@@ -355,11 +363,11 @@ impl Storage {
         let id = self.table_id(table)?;
         let t = self.db.table(table)?;
         self.throttle(&t);
-        let csn = t.upsert(row.clone())?;
+        let (csn, stored) = t.upsert_returning(row)?;
         self.log(WalRecord::Insert {
             table: id,
             csn,
-            row,
+            row: stored,
         })?;
         Ok(csn)
     }

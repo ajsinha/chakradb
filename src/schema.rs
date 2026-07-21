@@ -171,6 +171,14 @@ impl Schema {
     }
 }
 
+// Equality ignores the cached Arrow schema, which is derived from the columns.
+impl PartialEq for Schema {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_shape(other)
+    }
+}
+impl Eq for Schema {}
+
 /// A single row: one `Value` per schema column, including the key column (and a
 /// hidden rowid when the table has one).
 #[derive(Debug, Clone, PartialEq)]
