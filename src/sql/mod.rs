@@ -25,7 +25,7 @@ pub mod plan;
 pub mod value;
 
 pub use exec::{execute, Outcome};
-pub use plan::{plan, Plan};
+pub use plan::{plan, plan_in, Plan};
 pub use plan::{AggFn, Projection};
 pub use value::Value;
 
@@ -44,9 +44,10 @@ impl SqlEngine {
         SqlEngine { db }
     }
 
-    /// Parse, plan, and execute one statement.
+    /// Parse, plan, and execute one statement. Column names resolve against the
+    /// live catalog, so each table's declared schema is honoured.
     pub fn run(&self, sql: &str) -> Result<Outcome, Error> {
-        let plan = plan(sql).map_err(Error::Sql)?;
+        let plan = plan_in(sql, &self.db).map_err(Error::Sql)?;
         execute(&self.db, plan)
     }
 
@@ -75,7 +76,7 @@ mod tests {
     #[test]
     fn end_to_end_ddl_dml_query() {
         let e = engine();
-        e.run("CREATE TABLE t (pk INT)").unwrap();
+        e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
         e.run("INSERT INTO t VALUES (1, 100, 1.5, 'alice')").unwrap();
         e.run("INSERT INTO t VALUES (2, 200, 2.5, 'bob')").unwrap();
 
@@ -87,7 +88,7 @@ mod tests {
     #[test]
     fn update_then_query_reflects_change() {
         let e = engine();
-        e.run("CREATE TABLE t (pk INT)").unwrap();
+        e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
         e.run("INSERT INTO t VALUES (1, 1, 0, 'old')").unwrap();
         e.run("UPDATE t SET c = 'new' WHERE pk = 1").unwrap();
         assert_eq!(e.query("SELECT c FROM t").unwrap()[0][0], "new");
@@ -96,7 +97,7 @@ mod tests {
     #[test]
     fn aggregate_over_inserts() {
         let e = engine();
-        e.run("CREATE TABLE t (pk INT)").unwrap();
+        e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
         for i in 1..=10 {
             e.run(&format!("INSERT INTO t VALUES ({i}, {}, 0, 'x')", i * 10))
                 .unwrap();
@@ -115,14 +116,14 @@ mod tests {
     #[test]
     fn query_on_a_statement_is_an_error() {
         let e = engine();
-        e.run("CREATE TABLE t (pk INT)").unwrap();
+        e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
         assert!(e.query("INSERT INTO t VALUES (1,1,1,'x')").is_err());
     }
 
     #[test]
     fn snapshot_semantics_hold_through_sql() {
         let e = engine();
-        e.run("CREATE TABLE t (pk INT)").unwrap();
+        e.run("CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)").unwrap();
         e.run("INSERT INTO t VALUES (1, 1, 0, 'a')").unwrap();
         e.run("INSERT INTO t VALUES (2, 2, 0, 'b')").unwrap();
         e.run("DELETE FROM t WHERE pk = 1").unwrap();

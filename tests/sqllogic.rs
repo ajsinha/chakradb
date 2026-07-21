@@ -126,7 +126,7 @@ fn run_script(script: &str) {
 const BASICS: &str = "
 # Basic DDL/DML/query round-trip over the fixed schema.
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 statement ok
 INSERT INTO t VALUES (1, 10, 1.5, 'alice')
@@ -156,7 +156,7 @@ SELECT pk FROM t ORDER BY pk DESC LIMIT 1
 
 const AGGREGATES: &str = "
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 statement ok
 INSERT INTO t VALUES (1, 10, 1.0, 'x')
@@ -190,7 +190,7 @@ SELECT AVG(a) FROM t
 
 const THREE_VALUED_LOGIC: &str = "
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 statement ok
 INSERT INTO t VALUES (1, 10, 0.0, 'a')
@@ -213,7 +213,7 @@ SELECT COUNT(*) FROM t WHERE a IS NOT NULL
 
 const MUTATIONS: &str = "
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 statement ok
 INSERT INTO t VALUES (1, 10, 0.0, 'old')
@@ -240,7 +240,7 @@ SELECT COUNT(*) FROM t
 
 const ERRORS: &str = "
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 # Duplicate primary key.
 statement ok
@@ -264,7 +264,7 @@ SELCT WHATEVER
 
 const GROUPING: &str = "
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 statement ok
 INSERT INTO t VALUES (1, 5, 0.0, 'x')
@@ -323,7 +323,7 @@ fn parser_handles_comments_and_blank_lines() {
     let script = "
 # a comment
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 
 # another comment after blanks
@@ -340,7 +340,7 @@ fn halt_stops_processing() {
     // Everything after `halt` is ignored, so the bad statement never runs.
     let script = "
 statement ok
-CREATE TABLE t (pk INT)
+CREATE TABLE t (pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)
 
 halt
 
