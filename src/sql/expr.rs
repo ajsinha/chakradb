@@ -6,7 +6,7 @@
 //! query engine returns subtly incorrect answers, so it is tested exhaustively.
 
 use super::value::{batch_value, column_index, row_value, Value};
-use crate::schema::Batch;
+use crate::batch::Batch;
 use crate::schema::Row;
 use std::cmp::Ordering;
 

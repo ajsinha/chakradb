@@ -1,169 +1,229 @@
-//! The M0 schema — deliberately hardcoded.
+//! Table schema and rows — arbitrary columns and types (the "be like DuckDB"
+//! work).
 //!
-//! M0 answers questions about index memory and scan-under-write behaviour, not
-//! about type systems. A fixed four-column shape keeps the prototype honest and
-//! small: `(pk i64, a i64, b f64, c string)`.
+//! M0–M2 hard-coded `(pk i64, a i64, b f64, c String)`. This module replaces
+//! that with a [`Schema`] describing any number of [`crate::value::Value`]
+//! columns, and a row that is a `Vec<Value>`.
 //!
-//! Note the deviation from `requirements.md` §5.1, which specifies Arrow for
-//! sealed parts. M0 uses a plain struct-of-vectors columnar layout instead.
-//! The rationale is recorded in `docs/m0-findings.md`: Arrow buys us nothing
-//! for M0's measurements and costs build time, and the sealed-part layout is
-//! not what M0 is testing. M2 introduces Arrow at the DataFusion boundary,
-//! where it actually earns its place.
+//! The one idea that keeps the engine simple (`docs/dynamic-schema-design.md`):
+//! **every table has exactly one key column.** It is either a user column
+//! declared `PRIMARY KEY` (of any type) or a hidden auto-increment `_rowid`
+//! synthesised when none is declared. The storage engine never learns which — it
+//! just sorts, seeks, and blooms on a key column of `Value`s. So "PK-less" is not
+//! a second code path; it is a table whose key is a hidden rowid.
+//!
+//! `default_schema()` reproduces the old four-column shape so the M0–M2 test
+//! suite keeps exercising the engine through the new types.
 
-/// A single logical row.
+use crate::error::{Error, Result};
+use crate::value::{DataType, Value};
+use arrow::datatypes::{DataType as ArrowType, Field, Schema as ArrowSchema, SchemaRef};
+use std::sync::Arc;
+
+/// The hidden key column synthesised for a table declared without a PRIMARY KEY.
+pub const ROWID: &str = "_rowid";
+
+/// One column: a name and a declared type. Every column is nullable (SQL).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDef {
+    pub name: String,
+    pub ty: DataType,
+}
+
+impl ColumnDef {
+    pub fn new(name: impl Into<String>, ty: DataType) -> Self {
+        ColumnDef {
+            name: name.into(),
+            ty,
+        }
+    }
+}
+
+/// A table's shape: its columns, which one is the key, and whether that key is a
+/// synthesised rowid (hidden from `SELECT *`).
+#[derive(Debug, Clone)]
+pub struct Schema {
+    columns: Vec<ColumnDef>,
+    key_index: usize,
+    synthetic_key: bool,
+    arrow: SchemaRef,
+}
+
+fn arrow_type(ty: DataType) -> ArrowType {
+    match ty {
+        DataType::Int => ArrowType::Int64,
+        DataType::Float => ArrowType::Float64,
+        DataType::Text => ArrowType::Utf8,
+        DataType::Bool => ArrowType::Boolean,
+    }
+}
+
+impl Schema {
+    /// Build a schema from explicit columns and a key column index.
+    pub fn new(columns: Vec<ColumnDef>, key_index: usize, synthetic_key: bool) -> Self {
+        assert!(key_index < columns.len(), "key_index out of range");
+        let arrow = Arc::new(ArrowSchema::new(
+            columns
+                .iter()
+                .map(|c| Field::new(&c.name, arrow_type(c.ty), true))
+                .collect::<Vec<_>>(),
+        ));
+        Schema {
+            columns,
+            key_index,
+            synthetic_key,
+            arrow,
+        }
+    }
+
+    /// User columns plus a hidden `_rowid` key appended at the end. `key` is the
+    /// index of a user PRIMARY KEY column, or `None` for a rowid table.
+    pub fn from_user_columns(mut columns: Vec<ColumnDef>, key: Option<usize>) -> Self {
+        match key {
+            Some(k) => Schema::new(columns, k, false),
+            None => {
+                let key_index = columns.len();
+                columns.push(ColumnDef::new(ROWID, DataType::Int));
+                Schema::new(columns, key_index, true)
+            }
+        }
+    }
+
+    /// The M0–M2 shape: `(pk INT PRIMARY KEY, a INT, b FLOAT, c TEXT)`.
+    pub fn default_schema() -> Self {
+        Schema::new(
+            vec![
+                ColumnDef::new("pk", DataType::Int),
+                ColumnDef::new("a", DataType::Int),
+                ColumnDef::new("b", DataType::Float),
+                ColumnDef::new("c", DataType::Text),
+            ],
+            0,
+            false,
+        )
+    }
+
+    pub fn columns(&self) -> &[ColumnDef] {
+        &self.columns
+    }
+    pub fn arity(&self) -> usize {
+        self.columns.len()
+    }
+    pub fn key_index(&self) -> usize {
+        self.key_index
+    }
+    pub fn synthetic_key(&self) -> bool {
+        self.synthetic_key
+    }
+    pub fn key_type(&self) -> DataType {
+        self.columns[self.key_index].ty
+    }
+    pub fn arrow(&self) -> SchemaRef {
+        self.arrow.clone()
+    }
+    pub fn column(&self, i: usize) -> &ColumnDef {
+        &self.columns[i]
+    }
+
+    /// Resolve a column name to its index (case-insensitive), including the
+    /// hidden rowid.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Indices of the columns a bare `SELECT *` expands to — every column except
+    /// a synthesised rowid key.
+    pub fn star_indices(&self) -> Vec<usize> {
+        (0..self.columns.len())
+            .filter(|&i| !(self.synthetic_key && i == self.key_index))
+            .collect()
+    }
+
+    /// Validate and type-coerce a row against this schema.
+    pub fn check_row(&self, row: &Row) -> Result<()> {
+        if row.values.len() != self.columns.len() {
+            return Err(Error::SchemaMismatch(format!(
+                "expected {} columns, got {}",
+                self.columns.len(),
+                row.values.len()
+            )));
+        }
+        for (v, c) in row.values.iter().zip(&self.columns) {
+            if !v.fits(c.ty) {
+                return Err(Error::SchemaMismatch(format!(
+                    "column {} expects {}, got {:?}",
+                    c.name,
+                    c.ty.name(),
+                    v
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Two schemas are structurally equal (columns, key, rowid flag).
+    pub fn same_shape(&self, other: &Schema) -> bool {
+        self.columns == other.columns
+            && self.key_index == other.key_index
+            && self.synthetic_key == other.synthetic_key
+    }
+}
+
+/// A single row: one `Value` per schema column, including the key column (and a
+/// hidden rowid when the table has one).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
-    pub pk: i64,
-    pub a: i64,
-    pub b: f64,
-    pub c: String,
+    pub values: Vec<Value>,
 }
 
 impl Row {
+    /// General constructor.
+    pub fn from_values(values: Vec<Value>) -> Self {
+        Row { values }
+    }
+
+    /// Default-schema convenience `(pk, a, b, c)`, used pervasively by the M0–M2
+    /// tests and benches. Equivalent to a row over [`Schema::default_schema`].
     pub fn new(pk: i64, a: i64, b: f64, c: impl Into<String>) -> Self {
         Row {
-            pk,
-            a,
-            b,
-            c: c.into(),
+            values: vec![
+                Value::Int(pk),
+                Value::Int(a),
+                Value::Float(b),
+                Value::Text(c.into()),
+            ],
         }
     }
 
-    /// Heap bytes owned by this row beyond its own size.
+    pub fn get(&self, i: usize) -> &Value {
+        &self.values[i]
+    }
+
+    /// The key value at `key_index`.
+    pub fn key(&self, key_index: usize) -> &Value {
+        &self.values[key_index]
+    }
+
+    /// Heap bytes owned beyond the row's own vector.
     pub fn heap_bytes(&self) -> usize {
-        self.c.capacity()
-    }
-}
-
-/// A columnar batch — the unit handed to a scan consumer.
-///
-/// Column vectors are parallel: index `i` across all four is one row.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Batch {
-    pub pk: Vec<i64>,
-    pub a: Vec<i64>,
-    pub b: Vec<f64>,
-    pub c: Vec<String>,
-}
-
-impl Batch {
-    pub fn new() -> Self {
-        Self::default()
+        self.values.iter().map(|v| v.heap_bytes()).sum()
     }
 
-    pub fn with_capacity(n: usize) -> Self {
-        Batch {
-            pk: Vec::with_capacity(n),
-            a: Vec::with_capacity(n),
-            b: Vec::with_capacity(n),
-            c: Vec::with_capacity(n),
-        }
+    // ---- default-schema accessors (compat with the M0–M2 tests) ----
+    /// Default-schema `pk` (column 0 as i64). Panics off the default schema.
+    pub fn pk(&self) -> i64 {
+        self.values[0].as_int().expect("default-schema pk is Int")
     }
-
-    pub fn len(&self) -> usize {
-        self.pk.len()
+    pub fn a(&self) -> i64 {
+        self.values[1].as_int().expect("default-schema a is Int")
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.pk.is_empty()
+    pub fn b(&self) -> f64 {
+        self.values[2].as_f64().expect("default-schema b is Float")
     }
-
-    pub fn push(&mut self, row: &Row) {
-        self.pk.push(row.pk);
-        self.a.push(row.a);
-        self.b.push(row.b);
-        self.c.push(row.c.clone());
-    }
-
-    pub fn push_owned(&mut self, row: Row) {
-        self.pk.push(row.pk);
-        self.a.push(row.a);
-        self.b.push(row.b);
-        self.c.push(row.c);
-    }
-
-    /// Materialise row `i`. Panics if out of bounds.
-    pub fn row(&self, i: usize) -> Row {
-        Row {
-            pk: self.pk[i],
-            a: self.a[i],
-            b: self.b[i],
-            c: self.c[i].clone(),
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = Row> + '_ {
-        (0..self.len()).map(move |i| self.row(i))
-    }
-
-    /// Append every row of `other`.
-    pub fn extend(&mut self, other: &Batch) {
-        self.pk.extend_from_slice(&other.pk);
-        self.a.extend_from_slice(&other.a);
-        self.b.extend_from_slice(&other.b);
-        self.c.extend(other.c.iter().cloned());
-    }
-
-    /// Append `other`, cloning only the columns `mask` marks as needed.
-    ///
-    /// Unneeded columns are filled with cheap placeholders (0 / 0.0 / empty
-    /// String — none of which allocate), preserving the all-columns-same-length
-    /// invariant while never touching a heap the query will not read. A
-    /// `SUM(a) WHERE a > 500` scan clones one column instead of four; a
-    /// `COUNT(*)` clones none. This is the single biggest interpreter win —
-    /// see `sql/exec.rs`.
-    pub fn extend_masked(&mut self, other: &Batch, mask: [bool; 4]) {
-        let n = other.len();
-        if mask[0] {
-            self.pk.extend_from_slice(&other.pk);
-        } else {
-            self.pk.resize(self.pk.len() + n, 0);
-        }
-        if mask[1] {
-            self.a.extend_from_slice(&other.a);
-        } else {
-            self.a.resize(self.a.len() + n, 0);
-        }
-        if mask[2] {
-            self.b.extend_from_slice(&other.b);
-        } else {
-            self.b.resize(self.b.len() + n, 0.0);
-        }
-        if mask[3] {
-            self.c.extend(other.c.iter().cloned());
-        } else {
-            self.c.resize(self.c.len() + n, String::new());
-        }
-    }
-
-    /// Approximate resident bytes, including string heap.
-    pub fn memory_bytes(&self) -> usize {
-        let fixed = self.pk.capacity() * 8 + self.a.capacity() * 8 + self.b.capacity() * 8;
-        let strings: usize = self.c.iter().map(|s| s.capacity()).sum();
-        let string_headers = self.c.capacity() * std::mem::size_of::<String>();
-        fixed + strings + string_headers
-    }
-
-    /// True if `pk` is non-decreasing across the batch.
-    pub fn is_sorted_by_pk(&self) -> bool {
-        self.pk.windows(2).all(|w| w[0] <= w[1])
-    }
-
-    /// Invariant check: all columns the same length.
-    pub fn is_well_formed(&self) -> bool {
-        let n = self.pk.len();
-        self.a.len() == n && self.b.len() == n && self.c.len() == n
-    }
-}
-
-impl FromIterator<Row> for Batch {
-    fn from_iter<T: IntoIterator<Item = Row>>(iter: T) -> Self {
-        let mut b = Batch::new();
-        for r in iter {
-            b.push_owned(r);
-        }
-        b
+    pub fn c(&self) -> String {
+        self.values[2 + 1].render()
     }
 }
 
@@ -171,123 +231,73 @@ impl FromIterator<Row> for Batch {
 mod tests {
     use super::*;
 
-    fn r(pk: i64) -> Row {
-        Row::new(pk, pk * 2, pk as f64 / 2.0, format!("v{pk}"))
+    #[test]
+    fn default_schema_is_the_m0_shape() {
+        let s = Schema::default_schema();
+        assert_eq!(s.arity(), 4);
+        assert_eq!(s.key_index(), 0);
+        assert!(!s.synthetic_key());
+        assert_eq!(s.key_type(), DataType::Int);
+        assert_eq!(s.column_index("c"), Some(3));
+        assert_eq!(s.star_indices(), vec![0, 1, 2, 3]);
     }
 
     #[test]
-    fn row_constructs_and_compares() {
-        let a = Row::new(1, 2, 3.0, "x");
-        let b = Row::new(1, 2, 3.0, "x".to_string());
-        assert_eq!(a, b);
+    fn rowid_table_hides_its_key() {
+        let s = Schema::from_user_columns(
+            vec![
+                ColumnDef::new("name", DataType::Text),
+                ColumnDef::new("age", DataType::Int),
+            ],
+            None,
+        );
+        assert!(s.synthetic_key());
+        assert_eq!(s.key_index(), 2);
+        assert_eq!(s.column(2).name, ROWID);
+        // SELECT * skips the hidden rowid.
+        assert_eq!(s.star_indices(), vec![0, 1]);
     }
 
     #[test]
-    fn empty_batch_is_empty() {
-        let b = Batch::new();
-        assert!(b.is_empty());
-        assert_eq!(b.len(), 0);
-        assert!(b.is_well_formed());
+    fn text_primary_key() {
+        let s = Schema::from_user_columns(
+            vec![
+                ColumnDef::new("email", DataType::Text),
+                ColumnDef::new("n", DataType::Int),
+            ],
+            Some(0),
+        );
+        assert!(!s.synthetic_key());
+        assert_eq!(s.key_type(), DataType::Text);
     }
 
     #[test]
-    fn push_and_read_back() {
-        let mut b = Batch::new();
-        b.push(&r(1));
-        b.push(&r(2));
-        assert_eq!(b.len(), 2);
-        assert_eq!(b.row(0), r(1));
-        assert_eq!(b.row(1), r(2));
-        assert!(b.is_well_formed());
+    fn check_row_enforces_arity_and_type() {
+        let s = Schema::default_schema();
+        assert!(s.check_row(&Row::new(1, 2, 3.0, "x")).is_ok());
+        assert!(s.check_row(&Row::from_values(vec![Value::Int(1)])).is_err());
+        let wrong = Row::from_values(vec![
+            Value::Text("no".into()),
+            Value::Int(2),
+            Value::Float(3.0),
+            Value::Text("x".into()),
+        ]);
+        assert!(s.check_row(&wrong).is_err(), "text in an int key column");
     }
 
     #[test]
-    fn push_owned_avoids_clone() {
-        let mut b = Batch::new();
-        b.push_owned(r(7));
-        assert_eq!(b.row(0), r(7));
+    fn default_row_accessors() {
+        let r = Row::new(7, 8, 9.5, "hi");
+        assert_eq!(r.pk(), 7);
+        assert_eq!(r.a(), 8);
+        assert_eq!(r.b(), 9.5);
+        assert_eq!(r.c(), "hi");
     }
 
     #[test]
-    fn iter_yields_all_rows_in_order() {
-        let b: Batch = (0..5).map(r).collect();
-        let got: Vec<i64> = b.iter().map(|row| row.pk).collect();
-        assert_eq!(got, vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn extend_concatenates() {
-        let mut a: Batch = (0..3).map(r).collect();
-        let b: Batch = (3..6).map(r).collect();
-        a.extend(&b);
-        assert_eq!(a.len(), 6);
-        assert_eq!(a.pk, vec![0, 1, 2, 3, 4, 5]);
-        assert!(a.is_well_formed());
-    }
-
-    #[test]
-    fn extend_with_empty_is_noop() {
-        let mut a: Batch = (0..3).map(r).collect();
-        let before = a.clone();
-        a.extend(&Batch::new());
-        assert_eq!(a, before);
-    }
-
-    #[test]
-    fn from_iter_builds_batch() {
-        let b: Batch = vec![r(1), r(2), r(3)].into_iter().collect();
-        assert_eq!(b.len(), 3);
-        assert!(b.is_well_formed());
-    }
-
-    #[test]
-    fn with_capacity_reserves_without_length() {
-        let b = Batch::with_capacity(100);
-        assert_eq!(b.len(), 0);
-        assert!(b.pk.capacity() >= 100);
-    }
-
-    #[test]
-    fn sorted_detection() {
-        let sorted: Batch = vec![r(1), r(2), r(2), r(5)].into_iter().collect();
-        assert!(sorted.is_sorted_by_pk());
-        let unsorted: Batch = vec![r(3), r(1)].into_iter().collect();
-        assert!(!unsorted.is_sorted_by_pk());
-    }
-
-    #[test]
-    fn single_row_and_empty_are_sorted() {
-        assert!(Batch::new().is_sorted_by_pk());
-        let one: Batch = vec![r(9)].into_iter().collect();
-        assert!(one.is_sorted_by_pk());
-    }
-
-    #[test]
-    fn memory_bytes_grows_with_content() {
-        let small: Batch = (0..10).map(r).collect();
-        let big: Batch = (0..1000).map(r).collect();
-        assert!(big.memory_bytes() > small.memory_bytes());
-        // Fixed-width columns alone account for 24 bytes/row.
-        assert!(big.memory_bytes() >= 1000 * 24);
-    }
-
-    #[test]
-    fn heap_bytes_reflects_string() {
-        let row = Row::new(1, 1, 1.0, "hello");
-        assert!(row.heap_bytes() >= 5);
-    }
-
-    #[test]
-    fn well_formed_detects_corruption() {
-        let mut b: Batch = (0..3).map(r).collect();
-        b.a.pop();
-        assert!(!b.is_well_formed());
-    }
-
-    #[test]
-    #[should_panic]
-    fn row_out_of_bounds_panics() {
-        let b = Batch::new();
-        let _ = b.row(0);
+    fn null_fits_every_column() {
+        let s = Schema::default_schema();
+        let r = Row::from_values(vec![Value::Int(1), Value::Null, Value::Null, Value::Null]);
+        assert!(s.check_row(&r).is_ok());
     }
 }

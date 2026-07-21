@@ -15,6 +15,7 @@ use crate::csn::Csn;
 use crate::durability::{CommitAction, Durability, GroupCommit};
 use crate::io::{File, Io};
 use crate::schema::Row;
+use crate::value::Value;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,7 +38,7 @@ pub enum WalRecord {
     Delete {
         table: u32,
         csn: Csn,
-        pk: i64,
+        key: Value,
     },
     /// L0 was sealed into a part; everything before this is in that part.
     Seal {
@@ -75,8 +76,8 @@ impl WalRecord {
             WalRecord::Insert { table, csn, row } => {
                 e.u8(OP_INSERT).u32(*table).u64(*csn).row(row);
             }
-            WalRecord::Delete { table, csn, pk } => {
-                e.u8(OP_DELETE).u32(*table).u64(*csn).i64(*pk);
+            WalRecord::Delete { table, csn, key } => {
+                e.u8(OP_DELETE).u32(*table).u64(*csn).value(key);
             }
             WalRecord::Seal {
                 table,
@@ -103,7 +104,7 @@ impl WalRecord {
             OP_DELETE => Ok(WalRecord::Delete {
                 table: d.u32()?,
                 csn: d.u64()?,
-                pk: d.i64()?,
+                key: d.value()?,
             }),
             OP_SEAL => Ok(WalRecord::Seal {
                 table: d.u32()?,

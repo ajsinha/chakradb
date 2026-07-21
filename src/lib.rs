@@ -59,6 +59,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod backpressure;
+pub mod batch;
 pub mod bloom;
 pub mod clock;
 pub mod codec;
@@ -85,6 +86,7 @@ pub mod sql;
 pub mod storage;
 pub mod storage_config;
 pub mod table;
+pub mod value;
 pub mod wal;
 
 pub use backpressure::{Backpressure, BackpressureConfig};
@@ -97,8 +99,10 @@ pub use metrics::{Metrics, MetricsSnapshot};
 #[cfg(unix)]
 pub use posix::{PosixIo, TempDir};
 pub use rng::Rng;
-pub use schema::{Batch, Row};
+pub use batch::Batch;
+pub use schema::{ColumnDef, Row, Schema};
 pub use sql::SqlEngine;
+pub use value::{DataType, Key, Value};
 pub use storage::{Storage, StorageConfig};
 pub use table::{Table, TableConfig, TableStats};
 
@@ -121,7 +125,7 @@ mod tests {
 
         t.seal();
         for pk in (0..100).step_by(3) {
-            t.delete(pk).unwrap();
+            t.delete(&Value::Int(pk)).unwrap();
         }
         let expected = 100 - (0..100).step_by(3).count();
         assert_eq!(t.row_count(db.snapshot()), expected);

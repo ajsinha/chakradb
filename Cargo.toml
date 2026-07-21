@@ -15,10 +15,15 @@ publish = false
 # M1+ will introduce arrow-rs, roaring, and a real WAL.
 [dependencies]
 sqlparser = "0.62"
-# DataFusion is the *bought* execution engine (requirements.md §8). It is
-# strictly optional: the core storage/MVCC/SQL crate builds with zero heavy
-# dependencies, and the vectorised executor is opt-in behind `--features
-# datafusion`. M3 evaluates whether the concurrency wedge survives it.
+# Arrow is now the CORE storage representation (see docs/dynamic-schema-design.md
+# and the M3 spike). Sealed parts hold Arrow arrays: columnar throughout,
+# zero-copy to DataFusion, and parts can persist as the open Arrow IPC format.
+# This ends the zero-dependency purity of M0/M1 — a deliberate trade for
+# arbitrary schema + a vectorised execution path. Pinned to 58 to match the
+# version DataFusion 54 resolves, so the bridge shares one arrow crate.
+arrow = { version = "58", features = ["ipc"] }
+# DataFusion is the *bought* execution engine (requirements.md §8), opt-in behind
+# `--features datafusion`. M3 evaluates whether the concurrency wedge survives it.
 datafusion = { version = "54", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 

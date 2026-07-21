@@ -12,6 +12,7 @@
 //! Little-endian throughout, matching every target platform we care about.
 
 use crate::schema::Row;
+use crate::value::Value;
 
 /// CRC-32 (IEEE 802.3), table-driven.
 pub fn crc32(data: &[u8]) -> u32 {
@@ -82,9 +83,66 @@ impl Encoder {
     pub fn str(&mut self, v: &str) -> &mut Self {
         self.bytes(v.as_bytes())
     }
-    pub fn row(&mut self, r: &Row) -> &mut Self {
-        self.i64(r.pk).i64(r.a).f64(r.b).str(&r.c);
+    /// A single tagged value: 1 type byte then the payload. Self-describing, so
+    /// a row of any schema decodes without knowing the schema.
+    pub fn value(&mut self, v: &Value) -> &mut Self {
+        match v {
+            Value::Null => {
+                self.u8(0);
+            }
+            Value::Int(i) => {
+                self.u8(1).i64(*i);
+            }
+            Value::Float(f) => {
+                self.u8(2).f64(*f);
+            }
+            Value::Text(s) => {
+                self.u8(3).str(s);
+            }
+            Value::Bool(b) => {
+                self.u8(4).u8(*b as u8);
+            }
+        }
         self
+    }
+    /// A row: arity then one tagged value per column.
+    pub fn row(&mut self, r: &Row) -> &mut Self {
+        self.u32(r.values.len() as u32);
+        for v in &r.values {
+            self.value(v);
+        }
+        self
+    }
+
+    /// A table schema: columns (name + type tag), key index, and rowid flag.
+    pub fn schema(&mut self, s: &crate::schema::Schema) -> &mut Self {
+        self.u32(s.arity() as u32);
+        for c in s.columns() {
+            self.str(&c.name).u8(datatype_tag(c.ty));
+        }
+        self.u32(s.key_index() as u32).u8(s.synthetic_key() as u8);
+        self
+    }
+}
+
+fn datatype_tag(ty: crate::value::DataType) -> u8 {
+    use crate::value::DataType::*;
+    match ty {
+        Int => 1,
+        Float => 2,
+        Text => 3,
+        Bool => 4,
+    }
+}
+
+fn tag_datatype(tag: u8) -> Option<crate::value::DataType> {
+    use crate::value::DataType::*;
+    match tag {
+        1 => Some(Int),
+        2 => Some(Float),
+        3 => Some(Text),
+        4 => Some(Bool),
+        _ => None,
     }
 }
 
@@ -168,13 +226,42 @@ impl<'a> Decoder<'a> {
         let b = self.bytes()?;
         String::from_utf8(b.to_vec()).map_err(|_| DecodeError::Malformed("invalid utf-8"))
     }
-    pub fn row(&mut self) -> DecodeResult<Row> {
-        Ok(Row {
-            pk: self.i64()?,
-            a: self.i64()?,
-            b: self.f64()?,
-            c: self.string()?,
+    /// One tagged value (mirror of [`Encoder::value`]).
+    pub fn value(&mut self) -> DecodeResult<Value> {
+        Ok(match self.u8()? {
+            0 => Value::Null,
+            1 => Value::Int(self.i64()?),
+            2 => Value::Float(self.f64()?),
+            3 => Value::Text(self.string()?),
+            4 => Value::Bool(self.u8()? != 0),
+            _ => return Err(DecodeError::Malformed("bad value tag")),
         })
+    }
+    pub fn row(&mut self) -> DecodeResult<Row> {
+        let n = self.u32()? as usize;
+        let mut values = Vec::with_capacity(n);
+        for _ in 0..n {
+            values.push(self.value()?);
+        }
+        Ok(Row::from_values(values))
+    }
+
+    /// Decode a table schema (mirror of [`Encoder::schema`]).
+    pub fn schema(&mut self) -> DecodeResult<crate::schema::Schema> {
+        use crate::schema::ColumnDef;
+        let n = self.u32()? as usize;
+        let mut columns = Vec::with_capacity(n);
+        for _ in 0..n {
+            let name = self.string()?;
+            let ty = tag_datatype(self.u8()?).ok_or(DecodeError::Malformed("bad type tag"))?;
+            columns.push(ColumnDef::new(name, ty));
+        }
+        let key_index = self.u32()? as usize;
+        let synthetic = self.u8()? != 0;
+        if key_index >= columns.len() {
+            return Err(DecodeError::Malformed("key_index out of range"));
+        }
+        Ok(crate::schema::Schema::new(columns, key_index, synthetic))
     }
 }
 

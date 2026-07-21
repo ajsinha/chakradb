@@ -11,6 +11,7 @@
 use crate::csn::{Csn, CsnGenerator, Snapshot};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
+use crate::schema::Schema;
 use crate::table::{Table, TableConfig, TableStats};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -38,18 +39,34 @@ impl Database {
         }
     }
 
-    /// Create a table. Fails if the name is taken.
+    /// Create a table with the default `(pk, a, b, c)` schema. Fails if the name
+    /// is taken.
     pub fn create_table(&self, name: &str) -> Result<Arc<Table>> {
         self.create_table_with(name, self.default_config.clone())
     }
 
     pub fn create_table_with(&self, name: &str, config: TableConfig) -> Result<Arc<Table>> {
+        self.create_table_full(name, Schema::default_schema(), config)
+    }
+
+    /// Create a table with an explicit schema.
+    pub fn create_table_schema(&self, name: &str, schema: Schema) -> Result<Arc<Table>> {
+        self.create_table_full(name, schema, self.default_config.clone())
+    }
+
+    pub fn create_table_full(
+        &self,
+        name: &str,
+        schema: Schema,
+        config: TableConfig,
+    ) -> Result<Arc<Table>> {
         let mut tables = self.tables.write().unwrap();
         if tables.contains_key(name) {
             return Err(Error::TableExists(name.to_string()));
         }
         let t = Arc::new(Table::new(
             name,
+            schema,
             self.csn.clone(),
             self.metrics.clone(),
             config,
@@ -148,6 +165,7 @@ impl Default for Database {
 mod tests {
     use super::*;
     use crate::schema::Row;
+    use crate::value::Value;
 
     fn row(pk: i64) -> Row {
         Row::new(pk, pk, pk as f64, format!("v{pk}"))
@@ -216,8 +234,8 @@ mod tests {
         let b = db.create_table("b").unwrap();
         a.insert(Row::new(1, 100, 0.0, "in-a")).unwrap();
         b.insert(Row::new(1, 200, 0.0, "in-b")).unwrap();
-        assert_eq!(a.get_latest(1).unwrap().c, "in-a");
-        assert_eq!(b.get_latest(1).unwrap().c, "in-b");
+        assert_eq!(a.get_latest(&Value::Int(1)).unwrap().c(), "in-a");
+        assert_eq!(b.get_latest(&Value::Int(1)).unwrap().c(), "in-b");
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::pager::{PagedPart, PagerMetrics, PartSummary};
 type PendingParts = Vec<(String, u64, Vec<Arc<PagedPart>>)>;
 use crate::persist;
 use crate::schema::Row;
+use crate::value::Value;
 use crate::wal::{Wal, WalRecord};
 use std::collections::HashMap;
 use std::io as stdio;
@@ -197,10 +198,10 @@ impl Storage {
                         }
                     }
                 }
-                WalRecord::Delete { table, csn, pk } => {
+                WalRecord::Delete { table, csn, key } => {
                     if let Some(n) = by_id.get(table) {
                         if let Ok(t) = self.db.table(n) {
-                            t.replay_delete(*pk, *csn);
+                            t.replay_delete(key, *csn);
                         }
                     }
                 }
@@ -256,19 +257,19 @@ impl Storage {
 
     /// Answer "could this key exist?" from resident summaries only, without
     /// faulting anything in. `true` still needs a real lookup to confirm.
-    pub fn may_contain_key(&self, table: &str, pk: i64) -> bool {
+    pub fn may_contain_key(&self, table: &str, key: &Value) -> bool {
         if self.warmed.get().is_some() {
             return self
                 .db
                 .table(table)
-                .map(|t| t.get_latest(pk).is_some())
+                .map(|t| t.get_latest(key).is_some())
                 .unwrap_or(false);
         }
         let pending = self.pending_parts.lock().unwrap();
         pending
             .iter()
             .filter(|(n, _, _)| n == table)
-            .any(|(_, _, parts)| parts.iter().any(|p| !p.definitely_excludes(pk)))
+            .any(|(_, _, parts)| parts.iter().any(|p| !p.definitely_excludes(key)))
     }
     pub fn recovery(&self) -> &RecoveryReport {
         &self.report
@@ -377,15 +378,15 @@ impl Storage {
         Ok(csn)
     }
 
-    pub fn delete(&self, table: &str, pk: i64) -> Result<Csn> {
+    pub fn delete(&self, table: &str, key: &Value) -> Result<Csn> {
         self.warm();
         let id = self.table_id(table)?;
         let t = self.db.table(table)?;
-        let csn = t.delete(pk)?;
+        let csn = t.delete(key)?;
         self.log(WalRecord::Delete {
             table: id,
             csn,
-            pk,
+            key: key.clone(),
         })?;
         Ok(csn)
     }

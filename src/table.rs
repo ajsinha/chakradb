@@ -9,13 +9,15 @@
 //! holding it. Contention on a single writer is deliberately cheaper than a
 //! concurrent index; M0-1 and M0-3 measure whether that holds.
 
+use crate::batch::Batch;
 use crate::compaction::{self, CompactionPolicy};
 use crate::csn::{Csn, CsnGenerator, Snapshot};
 use crate::error::{Error, Result};
 use crate::l0::L0Buffer;
 use crate::metrics::Metrics;
 use crate::part::{CreatedCsns, Part};
-use crate::schema::{Batch, Row};
+use crate::schema::{Row, Schema};
+use crate::value::Value;
 use std::sync::{Arc, RwLock};
 
 /// Tunables. Defaults follow the sizes named in §5.1.
@@ -65,18 +67,21 @@ enum Location {
     Part(usize, u32),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TableInner {
     l0: L0Buffer,
     /// Newest first — lookups stop at the first hit, so cost tracks recency.
     parts: Vec<Arc<Part>>,
     next_part_id: u64,
+    /// Next value for a synthesised `_rowid` key (unused for user-PK tables).
+    next_rowid: i64,
 }
 
-/// A primary-keyed table.
+/// A keyed table over an arbitrary [`Schema`].
 #[derive(Debug)]
 pub struct Table {
     name: String,
+    schema: Schema,
     inner: RwLock<TableInner>,
     csn: Arc<CsnGenerator>,
     metrics: Arc<Metrics>,
@@ -86,13 +91,21 @@ pub struct Table {
 impl Table {
     pub fn new(
         name: impl Into<String>,
+        schema: Schema,
         csn: Arc<CsnGenerator>,
         metrics: Arc<Metrics>,
         config: TableConfig,
     ) -> Self {
+        let inner = TableInner {
+            l0: L0Buffer::new(schema.clone()),
+            parts: Vec::new(),
+            next_part_id: 0,
+            next_rowid: 0,
+        };
         Table {
             name: name.into(),
-            inner: RwLock::new(TableInner::default()),
+            schema,
+            inner: RwLock::new(inner),
             csn,
             metrics,
             config,
@@ -101,6 +114,27 @@ impl Table {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The table's schema.
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    #[inline]
+    fn key_index(&self) -> usize {
+        self.schema.key_index()
+    }
+
+    /// Assign the next `_rowid` to a synthetic-key row whose key slot is empty.
+    fn assign_rowid(&self, inner: &mut TableInner, row: &mut Row) {
+        if self.schema.synthetic_key() {
+            let ki = self.schema.key_index();
+            if matches!(row.values[ki], Value::Null) {
+                row.values[ki] = Value::Int(inner.next_rowid);
+                inner.next_rowid += 1;
+            }
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -112,11 +146,13 @@ impl Table {
     }
 
     /// Insert a new row. Fails if the key already exists.
-    pub fn insert(&self, row: Row) -> Result<Csn> {
+    pub fn insert(&self, mut row: Row) -> Result<Csn> {
         let mut inner = self.inner.write().unwrap();
+        self.assign_rowid(&mut inner, &mut row);
+        let key = row.key(self.key_index()).clone();
         let snap = self.csn.snapshot();
-        if Self::locate(&inner, row.pk, snap, &self.metrics).is_some() {
-            return Err(Error::DuplicateKey(row.pk));
+        if Self::locate(&inner, &key, snap, &self.metrics).is_some() {
+            return Err(Error::DuplicateKey(key.render()));
         }
         let csn = self.csn.allocate();
         inner.l0.insert(row, csn);
@@ -126,10 +162,12 @@ impl Table {
     }
 
     /// Insert or replace.
-    pub fn upsert(&self, row: Row) -> Result<Csn> {
+    pub fn upsert(&self, mut row: Row) -> Result<Csn> {
         let mut inner = self.inner.write().unwrap();
+        self.assign_rowid(&mut inner, &mut row);
+        let key = row.key(self.key_index()).clone();
         let snap = self.csn.snapshot();
-        let existing = Self::locate(&inner, row.pk, snap, &self.metrics);
+        let existing = Self::locate(&inner, &key, snap, &self.metrics);
         let csn = self.csn.allocate();
         if let Some(loc) = existing {
             Self::tombstone(&mut inner, loc, csn)?;
@@ -145,9 +183,10 @@ impl Table {
     /// Replace an existing row. Fails if the key is absent.
     pub fn update(&self, row: Row) -> Result<Csn> {
         let mut inner = self.inner.write().unwrap();
+        let key = row.key(self.key_index()).clone();
         let snap = self.csn.snapshot();
-        let loc = Self::locate(&inner, row.pk, snap, &self.metrics)
-            .ok_or(Error::KeyNotFound(row.pk))?;
+        let loc = Self::locate(&inner, &key, snap, &self.metrics)
+            .ok_or_else(|| Error::KeyNotFound(key.render()))?;
         let csn = self.csn.allocate();
         Self::tombstone(&mut inner, loc, csn)?;
         inner.l0.insert(row, csn);
@@ -156,11 +195,12 @@ impl Table {
         Ok(csn)
     }
 
-    /// Delete by primary key. Fails if absent.
-    pub fn delete(&self, pk: i64) -> Result<Csn> {
+    /// Delete by key. Fails if absent.
+    pub fn delete(&self, key: &Value) -> Result<Csn> {
         let mut inner = self.inner.write().unwrap();
         let snap = self.csn.snapshot();
-        let loc = Self::locate(&inner, pk, snap, &self.metrics).ok_or(Error::KeyNotFound(pk))?;
+        let loc = Self::locate(&inner, key, snap, &self.metrics)
+            .ok_or_else(|| Error::KeyNotFound(key.render()))?;
         let csn = self.csn.allocate();
         Self::tombstone(&mut inner, loc, csn)?;
         Metrics::bump(&self.metrics.deletes);
@@ -168,17 +208,17 @@ impl Table {
     }
 
     /// Point read at a snapshot.
-    pub fn get(&self, pk: i64, snap: Snapshot) -> Option<Row> {
+    pub fn get(&self, key: &Value, snap: Snapshot) -> Option<Row> {
         let inner = self.inner.read().unwrap();
-        match Self::locate(&inner, pk, snap, &self.metrics)? {
+        match Self::locate(&inner, key, snap, &self.metrics)? {
             Location::L0(i) => Some(inner.l0.entries()[i].row.clone()),
             Location::Part(pi, ord) => Some(inner.parts[pi].batch().row(ord as usize)),
         }
     }
 
     /// Read at the newest committed state.
-    pub fn get_latest(&self, pk: i64) -> Option<Row> {
-        self.get(pk, self.snapshot())
+    pub fn get_latest(&self, key: &Value) -> Option<Row> {
+        self.get(key, self.snapshot())
     }
 
     /// Full scan at a snapshot.
@@ -186,45 +226,9 @@ impl Table {
     /// Captures the part list under a brief read lock, then scans outside it so
     /// writers are not blocked for the duration.
     pub fn scan(&self, snap: Snapshot) -> Batch {
-        let (parts, l0_rows) = {
-            let inner = self.inner.read().unwrap();
-            (inner.parts.clone(), inner.l0.scan(snap))
-        };
-        Metrics::bump(&self.metrics.scans);
-
-        let mut out = Batch::new();
-        for p in &parts {
-            if p.is_fully_visible_to(snap) {
-                Metrics::bump(&self.metrics.scan_fast_path);
-            } else {
-                Metrics::bump(&self.metrics.scan_slow_path);
-            }
-            out.extend(&p.scan(snap));
-        }
-        out.extend(&l0_rows);
-        out
-    }
-
-    /// Scan, cloning only the columns `mask` marks as needed. Used by the query
-    /// executor for projection pushdown — an aggregate that reads only column
-    /// `a` pays nothing for `pk`, `b`, or the `c` String heap.
-    pub fn scan_cols(&self, snap: Snapshot, mask: [bool; 4]) -> Batch {
-        let (parts, l0_rows) = {
-            let inner = self.inner.read().unwrap();
-            (inner.parts.clone(), inner.l0.scan(snap))
-        };
-        Metrics::bump(&self.metrics.scans);
-        let mut out = Batch::new();
-        for p in &parts {
-            if p.is_fully_visible_to(snap) {
-                Metrics::bump(&self.metrics.scan_fast_path);
-            } else {
-                Metrics::bump(&self.metrics.scan_slow_path);
-            }
-            p.scan_into(snap, &mut out, mask);
-        }
-        out.extend_masked(&l0_rows, mask);
-        out
+        let segments = self.scan_segments(snap);
+        let batches: Vec<Batch> = segments.iter().map(|s| s.batch().clone()).collect();
+        Batch::concat(&self.schema, &batches)
     }
 
     /// Scan as a list of **segments** the query executor can evaluate in place.
@@ -348,18 +352,25 @@ impl Table {
     /// taken before the crash would resolve differently after it.
     pub fn replay_insert(&self, row: Row, csn: Csn) {
         let mut inner = self.inner.write().unwrap();
+        let key = row.key(self.key_index()).clone();
+        // Keep the rowid allocator ahead of any replayed synthetic key.
+        if self.schema.synthetic_key() {
+            if let Value::Int(n) = key {
+                inner.next_rowid = inner.next_rowid.max(n + 1);
+            }
+        }
         let snap = Snapshot::at(csn.saturating_sub(1));
-        if let Some(loc) = Self::locate(&inner, row.pk, snap, &self.metrics) {
+        if let Some(loc) = Self::locate(&inner, &key, snap, &self.metrics) {
             let _ = Self::tombstone(&mut inner, loc, csn);
         }
         inner.l0.insert(row, csn);
     }
 
     /// Apply a logged delete during recovery.
-    pub fn replay_delete(&self, pk: i64, csn: Csn) {
+    pub fn replay_delete(&self, key: &Value, csn: Csn) {
         let mut inner = self.inner.write().unwrap();
         let snap = Snapshot::at(csn.saturating_sub(1));
-        if let Some(loc) = Self::locate(&inner, pk, snap, &self.metrics) {
+        if let Some(loc) = Self::locate(&inner, key, snap, &self.metrics) {
             let _ = Self::tombstone(&mut inner, loc, csn);
         }
     }
@@ -390,21 +401,21 @@ impl Table {
 
     // ---- internals -------------------------------------------------------
 
-    /// Find the live version of `pk`, newest tier first.
+    /// Find the live version of `key`, newest tier first.
     fn locate(
         inner: &TableInner,
-        pk: i64,
+        key: &Value,
         snap: Snapshot,
         metrics: &Metrics,
     ) -> Option<Location> {
         Metrics::bump(&metrics.lookups);
-        if let Some(i) = inner.l0.lookup(pk, snap) {
+        if let Some(i) = inner.l0.lookup(key, snap) {
             return Some(Location::L0(i));
         }
         for (pi, part) in inner.parts.iter().enumerate() {
             Metrics::bump(&metrics.parts_probed);
             use crate::part::LookupResult::*;
-            match part.lookup(pk, snap) {
+            match part.lookup(key, snap) {
                 OutOfBounds => {
                     Metrics::bump(&metrics.bounds_skips);
                 }

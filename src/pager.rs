@@ -26,11 +26,12 @@
 //! M2. A real replacement policy belongs with the M3 workload, where there will
 //! be evidence about what to evict.
 
+use crate::batch::Batch;
 use crate::csn::{Csn, Snapshot};
 use crate::io::Io;
 use crate::part::{LookupResult, Part};
 use crate::persist;
-use crate::schema::Batch;
+use crate::value::Value;
 use std::io as stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,8 +66,9 @@ impl PagerMetrics {
 pub struct PartSummary {
     pub id: u64,
     pub num_rows: usize,
-    pub min_pk: i64,
-    pub max_pk: i64,
+    /// Key bounds of any type (`Null` when the part is empty).
+    pub min_key: Value,
+    pub max_key: Value,
     pub created_min: Csn,
     pub created_max: Csn,
 }
@@ -109,8 +111,8 @@ impl PagedPart {
         let summary = PartSummary {
             id: part.id(),
             num_rows: part.num_rows(),
-            min_pk: part.min_pk(),
-            max_pk: part.max_pk(),
+            min_key: part.min_key().clone(),
+            max_key: part.max_key().clone(),
             created_min: part.created_min(),
             created_max: part.created_max(),
         };
@@ -145,8 +147,10 @@ impl PagedPart {
     ///
     /// Answering this needs no disk access, which is the point.
     #[inline]
-    pub fn definitely_excludes(&self, pk: i64) -> bool {
-        self.summary.num_rows == 0 || pk < self.summary.min_pk || pk > self.summary.max_pk
+    pub fn definitely_excludes(&self, key: &Value) -> bool {
+        self.summary.num_rows == 0
+            || key.total_cmp(&self.summary.min_key).is_lt()
+            || key.total_cmp(&self.summary.max_key).is_gt()
     }
 
     /// Fault the data in, if it is not already resident.
@@ -168,12 +172,12 @@ impl PagedPart {
     }
 
     /// Point lookup, avoiding the fault when bounds already answer it.
-    pub fn lookup(&self, pk: i64, snap: Snapshot) -> stdio::Result<LookupResult> {
-        if self.definitely_excludes(pk) {
+    pub fn lookup(&self, key: &Value, snap: Snapshot) -> stdio::Result<LookupResult> {
+        if self.definitely_excludes(key) {
             self.metrics.index_only_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(LookupResult::OutOfBounds);
         }
-        Ok(self.load()?.lookup(pk, snap))
+        Ok(self.load()?.lookup(key, snap))
     }
 
     /// Scan visible rows. Always faults the part in — a scan needs the data.
@@ -224,6 +228,13 @@ mod tests {
         Part::new(id, batch, CreatedCsns::Uniform(csn))
     }
 
+    fn pks(b: &Batch) -> Vec<i64> {
+        (0..b.len()).map(|i| b.key(i).as_int().unwrap()).collect()
+    }
+    fn k(n: i64) -> Value {
+        Value::Int(n)
+    }
+
     fn setup(pks: &[i64]) -> (Arc<MemIo>, Arc<PagerMetrics>, PagedPart) {
         let io = Arc::new(MemIo::new());
         let m = Arc::new(PagerMetrics::default());
@@ -241,19 +252,19 @@ mod tests {
         assert_eq!(m.parts_faulted.load(Ordering::Relaxed), 0);
         // But the summary is already usable.
         assert_eq!(paged.num_rows(), 3);
-        assert_eq!(paged.summary().min_pk, 1);
-        assert_eq!(paged.summary().max_pk, 3);
+        assert_eq!(paged.summary().min_key, k(1));
+        assert_eq!(paged.summary().max_key, k(3));
     }
 
     #[test]
     fn out_of_range_lookup_never_faults() {
         let (_io, m, paged) = setup(&[10, 20, 30]);
         assert_eq!(
-            paged.lookup(5, Snapshot::at(100)).unwrap(),
+            paged.lookup(&k(5), Snapshot::at(100)).unwrap(),
             LookupResult::OutOfBounds
         );
         assert_eq!(
-            paged.lookup(99, Snapshot::at(100)).unwrap(),
+            paged.lookup(&k(99), Snapshot::at(100)).unwrap(),
             LookupResult::OutOfBounds
         );
         assert!(!paged.is_resident(), "bounds rejection still read the data");
@@ -263,12 +274,12 @@ mod tests {
     #[test]
     fn in_range_lookup_faults_once() {
         let (_io, m, paged) = setup(&[10, 20, 30]);
-        assert!(paged.lookup(20, Snapshot::at(100)).unwrap().ordinal().is_some());
+        assert!(paged.lookup(&k(20), Snapshot::at(100)).unwrap().ordinal().is_some());
         assert!(paged.is_resident());
         assert_eq!(m.parts_faulted.load(Ordering::Relaxed), 1);
         // Subsequent lookups reuse the loaded data.
-        paged.lookup(30, Snapshot::at(100)).unwrap();
-        paged.lookup(10, Snapshot::at(100)).unwrap();
+        paged.lookup(&k(30), Snapshot::at(100)).unwrap();
+        paged.lookup(&k(10), Snapshot::at(100)).unwrap();
         assert_eq!(m.parts_faulted.load(Ordering::Relaxed), 1, "faulted twice");
     }
 
@@ -276,8 +287,8 @@ mod tests {
     fn faulted_data_matches_the_original() {
         let (_io, _m, paged) = setup(&[1, 5, 9]);
         let b = paged.scan(Snapshot::at(100)).unwrap();
-        assert_eq!(b.pk, vec![1, 5, 9]);
-        assert_eq!(b.c[1], "row-5");
+        assert_eq!(pks(&b), vec![1, 5, 9]);
+        assert_eq!(b.value(3, 1).render(), "row-5");
     }
 
     #[test]
@@ -310,7 +321,7 @@ mod tests {
             .map(|_| {
                 let p = paged.clone();
                 thread::spawn(move || {
-                    p.lookup(250, Snapshot::at(100)).unwrap();
+                    p.lookup(&k(250), Snapshot::at(100)).unwrap();
                 })
             })
             .collect();
@@ -327,8 +338,8 @@ mod tests {
     #[test]
     fn empty_part_excludes_everything() {
         let (_io, _m, paged) = setup(&[]);
-        assert!(paged.definitely_excludes(0));
-        assert!(paged.definitely_excludes(i64::MAX));
+        assert!(paged.definitely_excludes(&k(0)));
+        assert!(paged.definitely_excludes(&k(i64::MAX)));
         assert!(!paged.is_resident());
     }
 
@@ -360,6 +371,6 @@ mod tests {
         let s = read_summary(&*io, "p3").unwrap();
         assert_eq!(s.num_rows, 4, "summary should count physical rows");
         let paged = PagedPart::register(s, "p3".into(), io as Arc<dyn Io>, m);
-        assert_eq!(paged.scan(Snapshot::at(50)).unwrap().pk, vec![1, 3, 4]);
+        assert_eq!(pks(&paged.scan(Snapshot::at(50)).unwrap()), vec![1, 3, 4]);
     }
 }
