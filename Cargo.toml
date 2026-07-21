@@ -28,6 +28,11 @@ datafusion = { version = "54", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 
 [features]
+# DataFusion is the default execution engine: SQL SELECTs run on its vectorised
+# engine (~1-3x of DuckDB), and joins/windows/subqueries work. Build with
+# `--no-default-features` for the lean, zero-heavy-dependency, forbid(unsafe)
+# interpreter-only engine (single-table SQL) — the embedded/minimal profile.
+default = ["datafusion"]
 datafusion = ["dep:datafusion", "dep:tokio"]
 
 [lib]
