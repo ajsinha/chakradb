@@ -12,7 +12,7 @@
 //! makes bounds useless and forces a Bloom probe on every part. If correctness
 //! or the Bloom filter fails here, §5.2's funnel does not hold in general.
 
-use chakradb::{Database, Metrics, Row, Rng, TableConfig};
+use chakradb::{Database, Metrics, Row, Rng, TableConfig, Value};
 
 fn row(pk: i64, tag: &str) -> Row {
     // wrapping_mul: this suite deliberately uses i64::MIN / i64::MAX as keys.
@@ -59,7 +59,7 @@ fn overlapping_ranges_defeat_bounds_but_bloom_holds() {
     let before = t.metrics().snapshot();
     let snap = db.snapshot();
     for pk in (0..n).step_by(37) {
-        assert!(t.get(pk, snap).is_some(), "lost key {pk}");
+        assert!(t.get(&Value::Int(pk), snap).is_some(), "lost key {pk}");
     }
     let after = t.metrics().snapshot();
 
@@ -100,7 +100,7 @@ fn absent_keys_are_rejected_cheaply_under_overlap() {
     // Odd keys only — every one is guaranteed absent. (Stepping by an odd
     // stride from an odd start would alternate parity and hit real keys.)
     for pk in (1..20_000).step_by(2).filter(|k| k % 202 == 1) {
-        assert!(t.get(pk, snap).is_none(), "phantom key {pk}");
+        assert!(t.get(&Value::Int(pk), snap).is_none(), "phantom key {pk}");
     }
     let after = t.metrics().snapshot();
 
@@ -133,7 +133,7 @@ fn clustered_hot_keys_still_resolve_correctly() {
     assert_eq!(t.row_count(snap), 50, "hot-set updates changed row count");
     for pk in 0..50i64 {
         assert_eq!(
-            t.get(pk, snap).unwrap().c,
+            t.get(&Value::Int(pk), snap).unwrap().c(),
             "v39",
             "stale version survived for {pk}"
         );
@@ -155,9 +155,9 @@ fn extreme_key_values_do_not_break_bounds() {
 
     let snap = db.snapshot();
     for (i, &pk) in keys.iter().enumerate() {
-        assert_eq!(t.get(pk, snap).unwrap().c, format!("k{i}"), "lost {pk}");
+        assert_eq!(t.get(&Value::Int(pk), snap).unwrap().c(), format!("k{i}"), "lost {pk}");
     }
-    assert!(t.get(12_345, snap).is_none());
+    assert!(t.get(&Value::Int(12_345), snap).is_none());
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn fanout_grows_but_lookups_stay_correct_at_scale() {
     let snap = db.snapshot();
     let mut checked = 0;
     for pk in (0..n).step_by(13) {
-        assert!(t.get(pk, snap).is_some(), "lost {pk} at depth");
+        assert!(t.get(&Value::Int(pk), snap).is_some(), "lost {pk} at depth");
         checked += 1;
     }
     assert!(checked > 1_000);

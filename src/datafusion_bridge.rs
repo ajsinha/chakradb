@@ -20,53 +20,27 @@
 //! handoff, which is what this experiment is for.
 
 use crate::csn::Snapshot;
-use crate::schema::Batch;
 use crate::table::Table;
-use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
-use std::sync::Arc;
-
-/// The fixed M0/M2 schema, in Arrow terms: `(pk i64, a i64, b f64, c text)`.
-pub fn hits_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("pk", DataType::Int64, false),
-        Field::new("a", DataType::Int64, false),
-        Field::new("b", DataType::Float64, false),
-        Field::new("c", DataType::Utf8, false),
-    ]))
-}
-
-/// One ChakraDB batch → one Arrow record batch (a column-wise copy).
-fn batch_to_record(b: &Batch, schema: &SchemaRef) -> RecordBatch {
-    let cs: Vec<&str> = b.c.iter().map(|s| s.as_str()).collect();
-    RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(Int64Array::from(b.pk.clone())),
-            Arc::new(Int64Array::from(b.a.clone())),
-            Arc::new(Float64Array::from(b.b.clone())),
-            Arc::new(StringArray::from(cs)),
-        ],
-    )
-    .expect("record batch shape matches schema")
-}
 
 /// Convert a consistent MVCC snapshot of `table` into a DataFusion `MemTable`.
 ///
-/// Each visible segment (a fully-visible sealed part read in place, or a
-/// materialised L0 / partial-visibility batch) becomes one Arrow record batch,
-/// so DataFusion can parallelise scans across them. Every row in the result is
-/// visible to `snap`; concurrent writers after `snap` are simply not seen — that
-/// is snapshot isolation carried across the executor boundary.
+/// Now that ChakraDB stores Arrow arrays, this is **zero-copy**: each visible
+/// segment already *is* an Arrow `RecordBatch`, so we hand DataFusion the parts'
+/// own columns (an `Arc` clone), never rebuilding them. It also works for *any*
+/// schema — the table's Arrow schema drives it — not just the fixed hits shape.
+///
+/// Every row in the result is visible to `snap`; writers committing after `snap`
+/// are simply not seen. That is snapshot isolation carried across the executor
+/// boundary — the property the M3 spike exists to prove.
 pub fn snapshot_memtable(table: &Table, snap: Snapshot) -> MemTable {
-    let schema = hits_schema();
+    let arrow_schema = table.schema().arrow();
     let batches: Vec<RecordBatch> = table
         .scan_segments(snap)
         .iter()
-        .map(|seg| batch_to_record(seg.batch(), &schema))
+        .map(|seg| seg.batch().record_batch().clone())
         .filter(|rb| rb.num_rows() > 0)
         .collect();
-    MemTable::try_new(schema, vec![batches]).expect("memtable from snapshot")
+    MemTable::try_new(arrow_schema, vec![batches]).expect("memtable from snapshot")
 }

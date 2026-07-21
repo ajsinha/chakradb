@@ -6,7 +6,7 @@
 use chakradb::codec::{frame, unframe};
 use chakradb::io::{Io, MemIo};
 use chakradb::wal::{Wal, WalRecord};
-use chakradb::{Csn, Durability, Row};
+use chakradb::{Csn, Durability, Row, Value};
 use std::sync::Arc;
 
 fn rec_insert(pk: i64, csn: Csn) -> WalRecord {
@@ -24,7 +24,7 @@ fn every_record_type_roundtrips() {
         WalRecord::Delete {
             table: 2,
             csn: 11,
-            pk: -7,
+            key: Value::Int(-7),
         },
         WalRecord::Seal {
             table: 3,

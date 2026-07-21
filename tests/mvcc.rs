@@ -4,7 +4,7 @@
 //! break, the MVCC design is wrong and M0 has failed regardless of what the
 //! benchmark says.
 
-use chakradb::{Database, Row, Snapshot};
+use chakradb::{Database, Row, Snapshot, Value};
 
 fn row(pk: i64, tag: &str) -> Row {
     Row::new(pk, pk * 2, pk as f64, tag)
@@ -38,14 +38,14 @@ fn snapshot_is_stable_across_many_mutations() {
         t.update(row(pk, "v1")).unwrap();
     }
     for pk in 0..25 {
-        t.delete(pk).unwrap();
+        t.delete(&Value::Int(pk)).unwrap();
     }
     t.seal();
     t.force_compact(snap.csn);
 
     let after = t.scan(snap);
     assert_eq!(after.len(), expected.len());
-    assert!(after.c.iter().all(|c| c == "v0"), "old snapshot changed");
+    assert!((0..after.len()).all(|i| after.value(3, i).render() == "v0"), "old snapshot changed");
 }
 
 #[test]
@@ -62,9 +62,9 @@ fn exactly_one_version_visible_at_every_snapshot() {
 
     for (i, snap) in checkpoints.iter().enumerate() {
         let b = t.scan(*snap);
-        let matching: Vec<_> = (0..b.len()).filter(|&j| b.pk[j] == 1).collect();
+        let matching: Vec<_> = (0..b.len()).filter(|&j| b.key(j).as_int() == Some(1)).collect();
         assert_eq!(matching.len(), 1, "snapshot {i} saw {} versions", matching.len());
-        assert_eq!(b.c[matching[0]], format!("v{i}"));
+        assert_eq!(b.value(3, matching[0]).render(), format!("v{i}"));
     }
 }
 
@@ -74,11 +74,11 @@ fn deleted_row_remains_visible_to_older_snapshots() {
     let t = db.create_table("t").unwrap();
     t.insert(row(1, "alive")).unwrap();
     let before = db.snapshot();
-    t.delete(1).unwrap();
+    t.delete(&Value::Int(1)).unwrap();
     let after = db.snapshot();
 
-    assert!(t.get(1, before).is_some());
-    assert!(t.get(1, after).is_none());
+    assert!(t.get(&Value::Int(1), before).is_some());
+    assert!(t.get(&Value::Int(1), after).is_none());
 }
 
 #[test]
@@ -86,12 +86,12 @@ fn reinsert_after_delete_is_a_new_version() {
     let db = Database::new();
     let t = db.create_table("t").unwrap();
     t.insert(row(1, "first")).unwrap();
-    t.delete(1).unwrap();
+    t.delete(&Value::Int(1)).unwrap();
     let gap = db.snapshot();
     t.insert(row(1, "second")).unwrap();
 
-    assert!(t.get(1, gap).is_none(), "must be absent in the gap");
-    assert_eq!(t.get_latest(1).unwrap().c, "second");
+    assert!(t.get(&Value::Int(1), gap).is_none(), "must be absent in the gap");
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "second");
     assert_eq!(t.row_count(db.snapshot()), 1);
 }
 
@@ -107,7 +107,7 @@ fn scan_and_row_count_always_agree() {
         }
     }
     for pk in (0..60).step_by(3) {
-        t.delete(pk).unwrap();
+        t.delete(&Value::Int(pk)).unwrap();
         snaps.push(db.snapshot());
     }
     t.seal();
@@ -137,9 +137,11 @@ fn visibility_survives_seal_and_compaction() {
     t.force_compact(early.csn);
 
     assert_eq!(t.scan(early).len(), early_before.len());
-    assert!(t.scan(early).c.iter().all(|c| c == "orig"));
+    let be = t.scan(early);
+    assert!((0..be.len()).all(|i| be.value(3, i).render() == "orig"));
     assert_eq!(t.scan(late).len(), late_before.len());
-    assert!(t.scan(late).c.iter().all(|c| c == "updated"));
+    let bl = t.scan(late);
+    assert!((0..bl.len()).all(|i| bl.value(3, i).render() == "updated"));
 }
 
 #[test]
@@ -162,7 +164,7 @@ fn very_old_snapshot_still_resolves() {
         t.upsert(row(1, &format!("v{i}"))).unwrap();
     }
     t.seal();
-    assert_eq!(t.get(1, ancient).unwrap().c, "ancient");
+    assert_eq!(t.get(&Value::Int(1), ancient).unwrap().c(), "ancient");
 }
 
 #[test]

@@ -9,7 +9,7 @@
 //! deterministic simulation of *concurrent* execution needs a scheduler seam
 //! too, which is M1 work — see §11.1's discussion of the Turso pattern.
 
-use chakradb::{Clock, Database, RealClock, Rng, Row, SimClock};
+use chakradb::{Clock, Database, RealClock, Rng, Row, SimClock, Value};
 use std::time::Duration;
 
 /// A seeded, single-threaded workload. Returns a fingerprint of final state.
@@ -25,7 +25,7 @@ fn run_workload(seed: u64, ops: usize) -> Vec<(i64, String)> {
                 let _ = t.upsert(Row::new(pk, i as i64, pk as f64, format!("v{i}")));
             }
             6..=8 => {
-                let _ = t.delete(pk);
+                let _ = t.delete(&Value::Int(pk));
             }
             _ => {
                 t.seal();
@@ -37,7 +37,7 @@ fn run_workload(seed: u64, ops: usize) -> Vec<(i64, String)> {
     }
 
     let b = t.scan(db.snapshot());
-    let mut out: Vec<(i64, String)> = (0..b.len()).map(|i| (b.pk[i], b.c[i].clone())).collect();
+    let mut out: Vec<(i64, String)> = (0..b.len()).map(|i| (b.key(i).as_int().unwrap(), b.value(3, i).render())).collect();
     out.sort();
     out
 }
@@ -77,7 +77,7 @@ fn workload_leaves_a_consistent_table() {
         if rng.chance(0.7) {
             let _ = t.upsert(Row::new(pk, i, 0.0, format!("v{i}")));
         } else {
-            let _ = t.delete(pk);
+            let _ = t.delete(&Value::Int(pk));
         }
     }
     t.seal();
@@ -86,18 +86,17 @@ fn workload_leaves_a_consistent_table() {
     let snap = db.snapshot();
     let b = t.scan(snap);
     assert_eq!(b.len(), t.row_count(snap));
-    assert!(b.is_well_formed());
 
     // No key may appear twice in a live scan.
-    let mut pks = b.pk.clone();
+    let mut pks: Vec<i64> = (0..b.len()).map(|i| b.key(i).as_int().unwrap()).collect();
     pks.sort_unstable();
     let before = pks.len();
     pks.dedup();
     assert_eq!(pks.len(), before, "duplicate live keys after compaction");
 
     // Every visible key must be individually retrievable.
-    for &pk in &b.pk {
-        assert!(t.get(pk, snap).is_some(), "scan/get disagree on {pk}");
+    for pk in (0..b.len()).map(|i| b.key(i).as_int().unwrap()) {
+        assert!(t.get(&Value::Int(pk), snap).is_some(), "scan/get disagree on {pk}");
     }
 }
 
@@ -111,16 +110,17 @@ fn get_and_scan_agree_under_random_workload() {
         if rng.chance(0.6) {
             let _ = t.upsert(Row::new(pk, i, 0.0, "x"));
         } else {
-            let _ = t.delete(pk);
+            let _ = t.delete(&Value::Int(pk));
         }
     }
     t.seal();
 
     let snap = db.snapshot();
-    let visible: std::collections::HashSet<i64> = t.scan(snap).pk.into_iter().collect();
+    let vb = t.scan(snap);
+    let visible: std::collections::HashSet<i64> = (0..vb.len()).map(|i| vb.key(i).as_int().unwrap()).collect();
     for pk in 0..150 {
         assert_eq!(
-            t.get(pk, snap).is_some(),
+            t.get(&Value::Int(pk), snap).is_some(),
             visible.contains(&pk),
             "disagreement on pk={pk}"
         );

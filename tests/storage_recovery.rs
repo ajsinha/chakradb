@@ -6,7 +6,7 @@
 
 use chakradb::io::{Io, MemIo};
 use chakradb::storage::{Storage, StorageConfig};
-use chakradb::{Durability, Row};
+use chakradb::{Durability, Row, Value};
 use std::sync::Arc;
 
 fn open(io: Arc<dyn Io>) -> Storage {
@@ -64,14 +64,14 @@ fn deletes_survive_reopen() {
             s.insert("t", row(pk, "v")).unwrap();
         }
         for pk in 0..10 {
-            s.delete("t", pk).unwrap();
+            s.delete("t", &Value::Int(pk)).unwrap();
         }
     }
     let s2 = open(io);
     let t = s2.database().table("t").unwrap();
     assert_eq!(t.row_count(s2.database().snapshot()), 10);
-    assert!(t.get_latest(0).is_none());
-    assert!(t.get_latest(15).is_some());
+    assert!(t.get_latest(&Value::Int(0)).is_none());
+    assert!(t.get_latest(&Value::Int(15)).is_some());
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn updates_survive_with_latest_value() {
     }
     let s2 = open(io);
     let t = s2.database().table("t").unwrap();
-    assert_eq!(t.get_latest(1).unwrap().c, "third");
+    assert_eq!(t.get_latest(&Value::Int(1)).unwrap().c(), "third");
     assert_eq!(t.row_count(s2.database().snapshot()), 1);
 }
 
@@ -172,7 +172,7 @@ fn multiple_tables_recover_independently() {
     assert_eq!(s2.database().table("a").unwrap().row_count(snap), 10);
     assert_eq!(s2.database().table("b").unwrap().row_count(snap), 5);
     assert_eq!(
-        s2.database().table("a").unwrap().get_latest(0).unwrap().c,
+        s2.database().table("a").unwrap().get_latest(&Value::Int(0)).unwrap().c(),
         "in-a"
     );
 }
@@ -224,7 +224,7 @@ fn compaction_result_survives_checkpoint() {
             s.insert("t", row(pk, "v")).unwrap();
         }
         for pk in 0..150 {
-            s.delete("t", pk).unwrap();
+            s.delete("t", &Value::Int(pk)).unwrap();
         }
         s.database().seal_all();
         s.compact_all();

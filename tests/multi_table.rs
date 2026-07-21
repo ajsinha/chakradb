@@ -6,7 +6,7 @@
 //! that a snapshot is consistent across every table, so a multi-table read
 //! observes one instant.
 
-use chakradb::{Database, Error, Row, TableConfig};
+use chakradb::{Database, Error, Row, TableConfig, Value};
 use std::sync::Arc;
 use std::thread;
 
@@ -35,13 +35,13 @@ fn key_spaces_are_independent() {
     users.insert(row(1, "alice")).unwrap();
     orders.insert(row(1, "order-1")).unwrap();
 
-    assert_eq!(users.get_latest(1).unwrap().c, "alice");
-    assert_eq!(orders.get_latest(1).unwrap().c, "order-1");
+    assert_eq!(users.get_latest(&Value::Int(1)).unwrap().c(), "alice");
+    assert_eq!(orders.get_latest(&Value::Int(1)).unwrap().c(), "order-1");
 
     // Deleting from one leaves the other untouched.
-    users.delete(1).unwrap();
-    assert!(users.get_latest(1).is_none());
-    assert!(orders.get_latest(1).is_some());
+    users.delete(&Value::Int(1)).unwrap();
+    assert!(users.get_latest(&Value::Int(1)).is_none());
+    assert!(orders.get_latest(&Value::Int(1)).is_some());
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn snapshot_is_consistent_across_tables() {
     let snap = db.snapshot();
 
     // A "transfer": delete in one, insert in the other.
-    a.delete(0).unwrap();
+    a.delete(&Value::Int(0)).unwrap();
     b.insert(row(100, "moved")).unwrap();
 
     // The old snapshot must see neither half of it.
@@ -130,7 +130,7 @@ fn dropped_table_is_gone_but_handles_survive() {
 
     assert!(db.table("t").is_err());
     // An outstanding Arc keeps working — no dangling reference.
-    assert!(t.get_latest(1).is_some());
+    assert!(t.get_latest(&Value::Int(1)).is_some());
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn seal_and_compact_all_touch_every_table() {
             t.insert(row(pk, "x")).unwrap();
         }
         for pk in 0..40 {
-            t.delete(pk).unwrap();
+            t.delete(&Value::Int(pk)).unwrap();
         }
     }
     db.seal_all();

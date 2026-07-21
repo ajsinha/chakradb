@@ -11,7 +11,7 @@
 //! Run with `cargo run --release --bin m0-bench`. Output is markdown, intended
 //! to be pasted into `docs/m0-findings.md` alongside interpretation.
 
-use chakradb::{Clock, Database, Metrics, RealClock, Rng, Row, TableConfig};
+use chakradb::{Clock, Database, Metrics, RealClock, Rng, Row, TableConfig, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -342,7 +342,7 @@ fn m0_4_cold_scan_version_cost(out: &mut String) {
     // Warm: one recent delete forces per-row checks on every scan.
     let (db2, t2) = build_table(ROWS, 500_000);
     t2.force_compact(db2.snapshot().csn);
-    t2.delete(ROWS / 2).unwrap();
+    t2.delete(&Value::Int(ROWS / 2)).unwrap();
     let m_before = t2.metrics().snapshot();
     let mut warm = Vec::new();
     for _ in 0..SCANS {
@@ -396,7 +396,7 @@ fn main() {
     }
     t.seal();
     for pk in (0..10_000).step_by(10) {
-        t.delete(pk).unwrap();
+        t.delete(&Value::Int(pk)).unwrap();
     }
     let _ = t.scan(db.snapshot());
     let m = t.metrics();
