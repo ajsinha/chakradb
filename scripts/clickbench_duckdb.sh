@@ -6,6 +6,7 @@ set -euo pipefail
 DUCKDB=${DUCKDB:-/home/ashutosh/duckdb/duckdb}
 CSV=${1:-/tmp/clickbench.csv}
 RUNS=${2:-5}
+N=${3:-0}   # row count; when >0, appends the Q13/Q14 selective-range queries
 DB=$(mktemp -u /tmp/clickbench_XXXX.db)
 
 "$DUCKDB" "$DB" -c "CREATE TABLE hits AS SELECT * FROM read_csv_auto('$CSV', header=true);" >/dev/null
@@ -26,6 +27,15 @@ declare -a Q=(
   "SELECT ResolutionWidth, COUNT(*) FROM hits GROUP BY ResolutionWidth ORDER BY COUNT(*) DESC LIMIT 10;"
 )
 declare -a L=(Q0 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q8 Q9 Q10 Q11 Q12)
+
+# Selective range scans on the sequential WatchID key — must match clickbench.rs.
+if [ "$N" -gt 0 ]; then
+  LO_NARROW=$((N - 20))
+  LO_WIDE=$((N - N / 100))
+  Q+=("SELECT WatchID, Title, EventDate FROM hits WHERE WatchID >= $LO_NARROW;")
+  Q+=("SELECT WatchID, EventDate FROM hits WHERE WatchID >= $LO_WIDE;")
+  L+=(Q13 Q14)
+fi
 
 echo "# DuckDB — ClickBench-shaped ($($DUCKDB --version))"
 echo "| query | DuckDB p50 (ms) |"

@@ -179,7 +179,29 @@ fn load(db: &Arc<Database>, path: &str, cols: &[(String, DataType)]) -> usize {
     n
 }
 
-fn queries() -> Vec<(&'static str, &'static str)> {
+fn queries(n: i64) -> Vec<(String, String)> {
+    let mut q: Vec<(String, String)> = base_queries()
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    // Selective range scans on the sequential `WatchID` primary key — the shape
+    // zonemap part pruning accelerates (and DuckDB accelerates via rowgroup
+    // pruning). These aren't in the standard ClickBench subset, which has no
+    // selective range predicate, so we add them to exercise pruning head-to-head.
+    let lo_narrow = n - 20; // last ~20 rows: prunes all but the final part
+    let lo_wide = n - n / 100; // last 1%
+    q.push((
+        "Q13 pk range ~20 rows".into(),
+        format!("SELECT WatchID, Title, EventDate FROM hits WHERE WatchID >= {lo_narrow}"),
+    ));
+    q.push((
+        "Q14 pk range ~1%".into(),
+        format!("SELECT WatchID, EventDate FROM hits WHERE WatchID >= {lo_wide}"),
+    ));
+    q
+}
+
+fn base_queries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Q0  count", "SELECT COUNT(*) FROM hits"),
         ("Q1  count filter", "SELECT COUNT(*) FROM hits WHERE AdvEngineID <> 0"),
@@ -266,8 +288,8 @@ fn main() {
     println!("Loaded {loaded} rows from {csv} in {load_s:.1}s. Median of {runs} runs.\n");
     println!("| query | ChakraDB p50 (ms) | rows | first-row |");
     println!("|---|---|---|---|");
-    for (label, sql) in queries() {
-        let (ms, rows, fp) = median_ms(&engine, sql, runs);
+    for (label, sql) in queries(n) {
+        let (ms, rows, fp) = median_ms(&engine, &sql, runs);
         println!("| {label} | {ms:.1} | {rows} | {fp} |");
     }
 }
