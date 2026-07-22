@@ -85,6 +85,18 @@ pub enum Plan {
         limit: Option<usize>,
         distinct: bool,
     },
+    /// `COPY <table> [(cols)] FROM '<path>'` — bulk-load a CSV file.
+    Copy {
+        table: String,
+        /// Schema column index for each CSV field, in file order.
+        columns: Vec<usize>,
+        path: String,
+        delimiter: u8,
+        quote: u8,
+        header: bool,
+        /// An unquoted field equal to this marker is loaded as NULL.
+        null_marker: String,
+    },
 }
 
 /// Parse and plan a single SQL statement, resolving column names against the
@@ -154,8 +166,107 @@ fn plan_statement(stmt: sa::Statement, schema_for: SchemaFor) -> Result<Plan, St
         sa::Statement::Delete(del) => plan_delete(del, schema_for),
         sa::Statement::Update(u) => plan_update(u.table, u.assignments, u.selection, schema_for),
         sa::Statement::Query(q) => plan_query(*q, schema_for),
+        sa::Statement::Copy {
+            source,
+            to,
+            target,
+            options,
+            legacy_options,
+            ..
+        } => plan_copy(source, to, target, options, legacy_options, schema_for),
         other => Err(format!("unsupported statement: {other:?}")),
     }
+}
+
+/// `COPY <table> [(cols)] FROM '<path>' [WITH (...)]` — bulk CSV load. Only the
+/// `FROM <file>` direction is supported (import); `COPY TO`, `STDIN`, and copying
+/// from a query are rejected with a clear error.
+fn plan_copy(
+    source: sa::CopySource,
+    to: bool,
+    target: sa::CopyTarget,
+    options: Vec<sa::CopyOption>,
+    legacy_options: Vec<sa::CopyLegacyOption>,
+    schema_for: SchemaFor,
+) -> Result<Plan, String> {
+    if to {
+        return Err("COPY TO (export) is unsupported; only COPY FROM a file".into());
+    }
+    let (table_name, cols) = match source {
+        sa::CopySource::Table {
+            table_name,
+            columns,
+        } => (object_name(&table_name), columns),
+        sa::CopySource::Query(_) => return Err("COPY from a query is unsupported".into()),
+    };
+    let path = match target {
+        sa::CopyTarget::File { filename } => filename,
+        other => return Err(format!("unsupported COPY source: {other:?}")),
+    };
+    let schema = need_schema(schema_for, &table_name)?;
+
+    // Column order: an explicit list maps names to positions; otherwise every
+    // insertable column (all but a synthesised rowid), in schema order.
+    let columns: Vec<usize> = if cols.is_empty() {
+        schema.star_indices()
+    } else {
+        cols.iter()
+            .map(|c| {
+                schema
+                    .column_index(&c.value)
+                    .ok_or_else(|| format!("no such column: {}", c.value))
+            })
+            .collect::<Result<_, _>>()?
+    };
+
+    // Options — modern `WITH (...)` and the legacy positional forms.
+    let mut delimiter = b',';
+    let mut quote = b'"';
+    let mut header = false;
+    let mut null_marker = String::new();
+    let set_char = |c: char, into: &mut u8| -> Result<(), String> {
+        if c.is_ascii() {
+            *into = c as u8;
+            Ok(())
+        } else {
+            Err(format!("COPY delimiter/quote must be ASCII, got {c:?}"))
+        }
+    };
+    for o in options {
+        match o {
+            sa::CopyOption::Delimiter(c) => set_char(c, &mut delimiter)?,
+            sa::CopyOption::Quote(c) => set_char(c, &mut quote)?,
+            sa::CopyOption::Header(h) => header = h,
+            sa::CopyOption::Null(s) => null_marker = s,
+            sa::CopyOption::Format(_) | sa::CopyOption::Encoding(_) => {} // CSV/UTF-8 only
+            other => return Err(format!("unsupported COPY option: {other:?}")),
+        }
+    }
+    for o in legacy_options {
+        match o {
+            sa::CopyLegacyOption::Delimiter(c) => set_char(c, &mut delimiter)?,
+            sa::CopyLegacyOption::Csv(csv) => {
+                for c in csv {
+                    match c {
+                        sa::CopyLegacyCsvOption::Header => header = true,
+                        sa::CopyLegacyCsvOption::Quote(q) => set_char(q, &mut quote)?,
+                        other => return Err(format!("unsupported COPY CSV option: {other:?}")),
+                    }
+                }
+            }
+            other => return Err(format!("unsupported COPY option: {other:?}")),
+        }
+    }
+
+    Ok(Plan::Copy {
+        table: table_name,
+        columns,
+        path,
+        delimiter,
+        quote,
+        header,
+        null_marker,
+    })
 }
 
 /// Build a [`Schema`] from a `CREATE TABLE` statement: one column per declared

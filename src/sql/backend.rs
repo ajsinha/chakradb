@@ -33,6 +33,18 @@ pub trait SqlBackend: Send + Sync {
     fn update(&self, table: &str, row: Row) -> Result<Csn>;
     fn delete(&self, table: &str, key: &Value) -> Result<Csn>;
 
+    /// Bulk-load rows whose keys are known to be new (the `COPY` fast path):
+    /// skips the per-row duplicate probe. The default is a correct row-by-row
+    /// fallback; `Database` and `Storage` override it with their bulk paths.
+    /// Callers must validate/coerce rows (types, constraints) first.
+    fn bulk_insert(&self, table: &str, rows: Vec<Row>) -> Result<usize> {
+        let n = rows.len();
+        for row in rows {
+            self.insert(table, row)?;
+        }
+        Ok(n)
+    }
+
     /// Apply a committed transaction's writes. A durable backend logs the whole
     /// batch as **one** WAL record, so it is crash-atomic (all-or-nothing).
     fn commit_batch(&self, writes: Vec<TxnWrite>) -> Result<()> {
@@ -82,6 +94,11 @@ impl SqlBackend for Database {
     fn delete(&self, table: &str, key: &Value) -> Result<Csn> {
         Database::table(self, table)?.delete(key)
     }
+    fn bulk_insert(&self, table: &str, rows: Vec<Row>) -> Result<usize> {
+        let n = rows.len();
+        Database::table(self, table)?.bulk_load(rows);
+        Ok(n)
+    }
 }
 
 impl SqlBackend for Storage {
@@ -115,5 +132,11 @@ impl SqlBackend for Storage {
     }
     fn commit_batch(&self, writes: Vec<TxnWrite>) -> Result<()> {
         Storage::commit_transaction(self, writes).map(|_| ())
+    }
+    fn bulk_insert(&self, table: &str, rows: Vec<Row>) -> Result<usize> {
+        let n = rows.len();
+        // Durable batch: WAL-logged, one flush for the whole chunk.
+        Storage::load_batch(self, table, rows)?;
+        Ok(n)
     }
 }

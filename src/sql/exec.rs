@@ -59,6 +59,7 @@ pub fn execute(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
             filter,
         } => exec_update(be, &table, sets, filter),
         Plan::Select { .. } => exec_select(be, plan),
+        Plan::Copy { .. } => exec_copy(be, plan),
     }
 }
 
@@ -68,6 +69,179 @@ fn exec_insert(be: &dyn SqlBackend, table: &str, rows: Vec<Row>) -> Result<Outco
         be.insert(table, row)?;
     }
     Ok(Outcome::Affected(n))
+}
+
+/// One parsed CSV field, tracking whether it was quoted — an *unquoted* empty
+/// field is a NULL, a quoted `""` is the empty string.
+struct CsvField {
+    text: String,
+    quoted: bool,
+}
+
+/// Split a CSV line into fields, honouring double-quoted fields (with `""` as an
+/// escaped quote). `delim`/`quote` are ASCII; parsing is over `char`s so UTF-8
+/// content survives. Embedded newlines inside quotes are not supported.
+fn parse_csv_line(line: &str, delim: char, quote: char) -> Vec<CsvField> {
+    let mut out = Vec::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        let mut buf = String::new();
+        let quoted = chars.peek() == Some(&quote);
+        if quoted {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == quote {
+                    if chars.peek() == Some(&quote) {
+                        buf.push(quote);
+                        chars.next();
+                    } else {
+                        break; // closing quote
+                    }
+                } else {
+                    buf.push(c);
+                }
+            }
+            // Ignore anything between the closing quote and the next delimiter.
+            while let Some(&c) = chars.peek() {
+                if c == delim {
+                    break;
+                }
+                chars.next();
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c == delim {
+                    break;
+                }
+                buf.push(c);
+                chars.next();
+            }
+        }
+        out.push(CsvField { text: buf, quoted });
+        match chars.peek() {
+            Some(&c) if c == delim => {
+                chars.next();
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+/// Parse a CSV text field into a value of the target column type. Returns `None`
+/// if the text is not a valid value for that type.
+fn parse_field(text: &str, ty: DataType) -> Option<Value> {
+    match ty {
+        DataType::Int => text.trim().parse::<i64>().ok().map(Value::Int),
+        DataType::Float => text.trim().parse::<f64>().ok().map(Value::Float),
+        DataType::Bool => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "1" | "yes" | "y" => Some(Value::Bool(true)),
+            "false" | "f" | "0" | "no" | "n" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        DataType::Text => Some(Value::Text(text.to_string())),
+        // Date/Timestamp/Decimal reuse the value coercions (which parse exactly
+        // and enforce range/precision).
+        DataType::Date | DataType::Timestamp | DataType::Decimal(..) => {
+            Value::Text(text.to_string()).coerce(ty)
+        }
+    }
+}
+
+/// `COPY <table> FROM '<path>'` — stream a CSV file, coerce and constraint-check
+/// each row, and bulk-load it in chunks (so a huge file never fully materialises
+/// in memory). Rows must have new keys, like the other bulk paths.
+fn exec_copy(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
+    use std::io::BufRead;
+    let Plan::Copy {
+        table,
+        columns,
+        path,
+        delimiter,
+        quote,
+        header,
+        null_marker,
+    } = plan
+    else {
+        unreachable!()
+    };
+    let schema = be.table(&table)?.schema().clone();
+    let checks = super::plan::planned_checks(&schema).map_err(Error::Sql)?;
+    // Defaults for columns not covered by the COPY column list, applied once.
+    let default_slots: Vec<(usize, Value)> = schema
+        .columns()
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| !columns.contains(i) && c.default.is_some())
+        .map(|(i, c)| (i, c.default.clone().unwrap()))
+        .collect();
+
+    let file = std::fs::File::open(&path)
+        .map_err(|e| Error::Sql(format!("COPY cannot open {path}: {e}")))?;
+    let mut reader = std::io::BufReader::new(file);
+    let (delim, quot) = (delimiter as char, quote as char);
+
+    const CHUNK: usize = 256 * 1024;
+    let mut batch: Vec<Row> = Vec::new();
+    let mut total = 0usize;
+    let mut line = String::new();
+    let mut lineno = 0usize;
+    let mut skip_header = header;
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|e| Error::Sql(format!("COPY read error: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        lineno += 1;
+        let raw = line.trim_end_matches(['\n', '\r']);
+        if skip_header {
+            skip_header = false;
+            continue;
+        }
+        if raw.is_empty() {
+            continue;
+        }
+        let fields = parse_csv_line(raw, delim, quot);
+        if fields.len() != columns.len() {
+            return Err(Error::Sql(format!(
+                "COPY line {lineno}: expected {} fields, got {}",
+                columns.len(),
+                fields.len()
+            )));
+        }
+        let mut values = vec![Value::Null; schema.arity()];
+        for (i, v) in &default_slots {
+            values[*i] = v.clone();
+        }
+        for (field, &slot) in fields.iter().zip(&columns) {
+            let c = schema.column(slot);
+            values[slot] = if !field.quoted && field.text == null_marker {
+                Value::Null
+            } else {
+                parse_field(&field.text, c.ty).ok_or_else(|| {
+                    Error::Sql(format!(
+                        "COPY line {lineno}: {:?} is not a valid {} for column {}",
+                        field.text,
+                        c.ty.name(),
+                        c.name
+                    ))
+                })?
+            };
+        }
+        let row = Row::from_values(values);
+        super::plan::enforce_constraints(&schema, &checks, &row)?;
+        batch.push(row);
+        if batch.len() >= CHUNK {
+            total += be.bulk_insert(&table, std::mem::take(&mut batch))?;
+        }
+    }
+    if !batch.is_empty() {
+        total += be.bulk_insert(&table, batch)?;
+    }
+    Ok(Outcome::Affected(total))
 }
 
 fn exec_delete(be: &dyn SqlBackend, table: &str, filter: Option<Expr>) -> Result<Outcome, Error> {
