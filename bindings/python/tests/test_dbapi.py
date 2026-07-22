@@ -127,3 +127,33 @@ def test_analytics_when_available():
     except chakradb.ProgrammingError:
         pytest.skip("joins require the datafusion feature (lean build)")
     assert rows == [(30,)]
+
+
+def test_transaction_commit_and_rollback():
+    con = chakradb.connect(autocommit=False)
+    con.execute("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+    con.commit()
+
+    # Commit persists.
+    con.execute("INSERT INTO t VALUES (1, 10)")
+    con.execute("INSERT INTO t VALUES (2, 20)")
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone() == (2,)  # read-your-writes
+    con.commit()
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone() == (2,)
+
+    # Rollback discards.
+    con.execute("INSERT INTO t VALUES (3, 30)")
+    con.execute("UPDATE t SET v = 99 WHERE id = 1")
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone() == (3,)  # sees own writes
+    con.rollback()
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone() == (2,)  # undone
+    assert con.execute("SELECT v FROM t WHERE id = 1").fetchone() == (10,)
+
+
+def test_autocommit_default_persists_without_commit():
+    con = chakradb.connect()  # autocommit=True
+    assert con.autocommit is True
+    con.execute("CREATE TABLE t (id INT PRIMARY KEY)")
+    con.execute("INSERT INTO t VALUES (1)")
+    # No commit() needed in autocommit mode.
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone() == (1,)

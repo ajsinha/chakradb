@@ -253,6 +253,7 @@ class Cursor:
 
     def execute(self, operation: str, parameters=()):
         self._check()
+        self.connection._maybe_begin(operation)
         bound = _bind(operation, parameters)
         try:
             cols, types, rows, rowcount, is_query = self.connection._conn.execute(bound)
@@ -351,16 +352,39 @@ class Connection:
     ProgrammingError = ProgrammingError
     NotSupportedError = NotSupportedError
 
-    def __init__(self, database: str = ":memory:"):
+    def __init__(self, database: str = ":memory:", autocommit: bool = True):
         try:
             self._conn = _core.Connection(database)
         except Exception as exc:
             raise _translate(exc) from None
         self._closed = False
+        #: When False, statements run inside a transaction that ``commit()`` /
+        #: ``rollback()`` control (PEP 249 style). When True (the default,
+        #: ChakraDB's HTAP fast path), statements auto-commit and analytical
+        #: reads use the vectorised engine.
+        self.autocommit = autocommit
 
     def _check(self):
         if self._closed:
             raise ProgrammingError("connection is closed")
+
+    _TXN_KEYWORDS = ("begin", "start", "commit", "rollback", "end")
+
+    def _maybe_begin(self, sql: str):
+        """In transaction mode, open a transaction before the first statement."""
+        if self.autocommit:
+            return
+        first = ""
+        stripped = sql.lstrip()
+        if stripped:
+            first = stripped.split(None, 1)[0].lower()
+        if first in self._TXN_KEYWORDS:
+            return  # explicit transaction control; don't auto-begin
+        if not self._conn.in_transaction():
+            try:
+                self._conn.begin()
+            except Exception as exc:
+                raise _translate(exc) from None
 
     def cursor(self) -> Cursor:
         self._check()
@@ -374,15 +398,30 @@ class Connection:
         return self.cursor().executemany(operation, seq_of_parameters)
 
     def commit(self):
-        # Statements auto-commit and are durable on return; nothing to do.
         self._check()
+        if self._conn.in_transaction():
+            try:
+                self._conn.commit_txn()
+            except Exception as exc:
+                raise _translate(exc) from None
+        # In autocommit mode, statements are already durable — nothing to do.
 
     def rollback(self):
-        # Autocommit: there is no open transaction to roll back.
         self._check()
+        if self._conn.in_transaction():
+            try:
+                self._conn.rollback_txn()
+            except Exception as exc:
+                raise _translate(exc) from None
 
     def close(self):
         if not self._closed:
+            # An open transaction is rolled back on close (PEP 249).
+            if self._conn.in_transaction():
+                try:
+                    self._conn.rollback_txn()
+                except Exception:
+                    pass
             self._conn.close()
             self._closed = True
 
@@ -394,10 +433,13 @@ class Connection:
         self.close()
 
 
-def connect(database: str = ":memory:", **kwargs) -> Connection:
+def connect(database: str = ":memory:", autocommit: bool = True, **kwargs) -> Connection:
     """Open a ChakraDB connection.
 
     ``database`` is ``":memory:"`` for an ephemeral database, or a directory
     path for a durable, crash-safe one (created if absent, recovered on reopen).
+
+    With ``autocommit=False`` the connection runs in transaction mode: statements
+    execute inside a transaction that ``commit()`` / ``rollback()`` control.
     """
-    return Connection(database)
+    return Connection(database, autocommit=autocommit)

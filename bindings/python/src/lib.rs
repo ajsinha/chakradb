@@ -40,6 +40,14 @@ struct Connection {
     engine: Option<SqlEngine>,
 }
 
+impl Connection {
+    fn engine(&self) -> PyResult<&SqlEngine> {
+        self.engine
+            .as_ref()
+            .ok_or_else(|| ProgrammingError::new_err("connection is closed"))
+    }
+}
+
 #[pymethods]
 impl Connection {
     /// `database` is `":memory:"` (or empty) for an ephemeral database, or a
@@ -108,6 +116,19 @@ impl Connection {
                 .unbind()
                 .into()),
         }
+    }
+
+    fn begin(&self) -> PyResult<()> {
+        self.engine()?.begin().map_err(map_err)
+    }
+    fn commit_txn(&self) -> PyResult<()> {
+        self.engine()?.commit().map_err(map_err)
+    }
+    fn rollback_txn(&self) -> PyResult<()> {
+        self.engine()?.rollback().map_err(map_err)
+    }
+    fn in_transaction(&self) -> bool {
+        self.engine.as_ref().map(|e| e.in_transaction()).unwrap_or(false)
     }
 
     fn close(&mut self) {
