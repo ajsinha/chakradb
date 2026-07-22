@@ -217,7 +217,18 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     // Zero-copy segment scan: fully-visible parts are read in place, never
     // concatenated into a giant batch. The filter runs against each segment's
     // own columns.
-    let segments = t.scan_segments(snap);
+    let mut segments = t.scan_segments(snap);
+
+    // Zonemap part pruning (DuckDB-style): drop any fully-materialised part
+    // whose per-column min/max bounds prove it holds no row matching the
+    // `WHERE` predicate — so a selective range scan never touches it. Only
+    // `Segment::Part` carries exact bounds; owned/partial segments always stay.
+    if let Some(f) = &filter {
+        segments.retain(|s| match s {
+            Segment::Part(p) => !f.excludes(p.col_bounds_all()),
+            _ => true,
+        });
+    }
 
     let non_grouped = group_by.is_empty()
         && projections
@@ -524,6 +535,53 @@ pub(crate) fn prefers_vectorized(plan: &Plan, key_index: usize) -> bool {
         return false;
     }
     true
+}
+
+/// Second-stage router check: given a plan the first stage sent to the vectorised
+/// engine, decide whether zonemap part pruning makes it *more* selective than a
+/// columnar scan — in which case the pruning interpreter wins. Cheap: consults
+/// only per-part min/max bounds, never scans a row.
+///
+/// Conservative by construction. It fires only for simple row-returning shapes
+/// (no aggregate / `GROUP BY` / `DISTINCT`) over a table with enough sealed parts
+/// to matter, and only when the predicate's zonemaps prune the large majority of
+/// rows — otherwise the interpreter's per-row rendering would lose to DataFusion.
+#[cfg(feature = "datafusion")]
+pub(crate) fn prune_favors_interpreter(plan: &Plan, table: &crate::table::Table) -> bool {
+    let Plan::Select {
+        projections,
+        filter,
+        group_by,
+        distinct,
+        ..
+    } = plan
+    else {
+        return false;
+    };
+    if !group_by.is_empty()
+        || *distinct
+        || projections
+            .iter()
+            .any(|p| !matches!(p, Projection::Expr(..)))
+    {
+        return false;
+    }
+    let Some(f) = filter else { return false };
+    let (parts, _) = table.parts_snapshot();
+    if parts.len() < 4 {
+        return false; // too few parts for pruning to pay off
+    }
+    let mut surviving = 0usize;
+    let mut total = 0usize;
+    for p in &parts {
+        let n = p.num_rows();
+        total += n;
+        if !f.excludes(p.col_bounds_all()) {
+            surviving += n;
+        }
+    }
+    // Only when ≥80% of rows are provably skipped.
+    total > 0 && surviving.saturating_mul(5) <= total
 }
 
 /// Whether batch row `i` passes an optional predicate, evaluated columnar.

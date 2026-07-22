@@ -72,6 +72,35 @@ impl Expr {
         }
     }
 
+    /// True if a part with these per-column `(min, max)` zonemap bounds **cannot**
+    /// contain any row matching this predicate — so the part can be skipped
+    /// (DuckDB-style zonemap pruning). Conservative: returns `false` whenever it
+    /// can't prove exclusion.
+    pub fn excludes(&self, bounds: &[Option<(Value, Value)>]) -> bool {
+        match self {
+            Expr::Binary(BinaryOp::And, l, r) => l.excludes(bounds) || r.excludes(bounds),
+            Expr::Binary(BinaryOp::Or, l, r) => l.excludes(bounds) && r.excludes(bounds),
+            Expr::Binary(op, l, r)
+                if matches!(
+                    op,
+                    BinaryOp::Eq | BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+                ) =>
+            {
+                // Normalise to `Column op Literal`.
+                let (col, cmp, lit) = match (l.as_ref(), r.as_ref()) {
+                    (Expr::Column(c), Expr::Literal(v)) => (*c, *op, v),
+                    (Expr::Literal(v), Expr::Column(c)) => (*c, flip(*op), v),
+                    _ => return false,
+                };
+                match bounds.get(col).and_then(|b| b.as_ref()) {
+                    Some((mn, mx)) => range_excludes(cmp, mn, mx, lit),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Evaluate against batch row `i`, columnar — no `Row` materialised.
     pub fn eval_at(&self, batch: &Batch, i: usize) -> Value {
         match self {
@@ -119,6 +148,31 @@ impl Expr {
             }
             _ => eval_compare(op, lv, rv),
         }
+    }
+}
+
+/// Flip a comparison when its operands are swapped (`lit op col` → `col op' lit`).
+fn flip(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::LtEq => BinaryOp::GtEq,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::GtEq => BinaryOp::LtEq,
+        other => other, // Eq is symmetric
+    }
+}
+
+/// Whether the value range `[mn, mx]` provably contains no value satisfying
+/// `col <cmp> lit`.
+fn range_excludes(cmp: BinaryOp, mn: &Value, mx: &Value, lit: &Value) -> bool {
+    use std::cmp::Ordering::*;
+    match cmp {
+        BinaryOp::Eq => lit.total_cmp(mn) == Less || lit.total_cmp(mx) == Greater,
+        BinaryOp::Lt => mn.total_cmp(lit) != Less, // min >= lit
+        BinaryOp::LtEq => mn.total_cmp(lit) == Greater, // min > lit
+        BinaryOp::Gt => mx.total_cmp(lit) != Greater, // max <= lit
+        BinaryOp::GtEq => mx.total_cmp(lit) == Less, // max < lit
+        _ => false,
     }
 }
 
@@ -262,6 +316,90 @@ mod tests {
     fn division_by_zero_is_null() {
         let e = Expr::Binary(BinaryOp::Div, lit_i(1), lit_i(0));
         assert!(e.eval(&row()).is_null());
+    }
+
+    // --- Zonemap part pruning (`excludes`) -------------------------------
+
+    /// A part holding column 0 in `[10, 20]` and column 1 in `[100, 200]`.
+    fn bounds() -> Vec<Option<(Value, Value)>> {
+        vec![
+            Some((Value::Int(10), Value::Int(20))),
+            Some((Value::Int(100), Value::Int(200))),
+        ]
+    }
+    fn col(i: usize) -> Box<Expr> {
+        Box::new(Expr::Column(i))
+    }
+    fn cmp(op: BinaryOp, c: usize, v: i64) -> Expr {
+        Expr::Binary(op, col(c), lit_i(v))
+    }
+
+    #[test]
+    fn excludes_prunes_when_range_cannot_match() {
+        // col0 = 5 → 5 < min(10): prunable.
+        assert!(cmp(BinaryOp::Eq, 0, 5).excludes(&bounds()));
+        // col0 = 25 → 25 > max(20): prunable.
+        assert!(cmp(BinaryOp::Eq, 0, 25).excludes(&bounds()));
+        // col0 < 10 → all values >= 10: prunable.
+        assert!(cmp(BinaryOp::Lt, 0, 10).excludes(&bounds()));
+        // col0 > 20 → all values <= 20: prunable.
+        assert!(cmp(BinaryOp::Gt, 0, 20).excludes(&bounds()));
+        // col0 >= 21 / <= 9: prunable.
+        assert!(cmp(BinaryOp::GtEq, 0, 21).excludes(&bounds()));
+        assert!(cmp(BinaryOp::LtEq, 0, 9).excludes(&bounds()));
+    }
+
+    #[test]
+    fn excludes_keeps_part_that_might_match() {
+        // Any of these overlaps [10, 20], so the part must be scanned.
+        assert!(!cmp(BinaryOp::Eq, 0, 15).excludes(&bounds()));
+        assert!(!cmp(BinaryOp::Lt, 0, 15).excludes(&bounds()));
+        assert!(!cmp(BinaryOp::Gt, 0, 15).excludes(&bounds()));
+        assert!(!cmp(BinaryOp::Eq, 0, 10).excludes(&bounds())); // boundary
+        assert!(!cmp(BinaryOp::Eq, 0, 20).excludes(&bounds())); // boundary
+    }
+
+    #[test]
+    fn excludes_handles_literal_on_the_left() {
+        // `5 = col0` normalises to `col0 = 5` → prunable; `15 = col0` is not.
+        let swapped = Expr::Binary(BinaryOp::Eq, lit_i(5), col(0));
+        assert!(swapped.excludes(&bounds()));
+        let keep = Expr::Binary(BinaryOp::Gt, lit_i(30), col(0)); // 30 > col0 == col0 < 30
+        assert!(!keep.excludes(&bounds()));
+        let prune = Expr::Binary(BinaryOp::Lt, lit_i(30), col(0)); // 30 < col0 == col0 > 30
+        assert!(prune.excludes(&bounds()));
+    }
+
+    #[test]
+    fn excludes_combines_and_or() {
+        // AND excludes if *either* side excludes.
+        let and = Expr::Binary(
+            BinaryOp::And,
+            Box::new(cmp(BinaryOp::Eq, 0, 15)), // keep
+            Box::new(cmp(BinaryOp::Eq, 1, 999)), // prune (999 > 200)
+        );
+        assert!(and.excludes(&bounds()));
+        // OR excludes only if *both* sides exclude.
+        let or = Expr::Binary(
+            BinaryOp::Or,
+            Box::new(cmp(BinaryOp::Eq, 0, 5)), // prune
+            Box::new(cmp(BinaryOp::Eq, 1, 150)), // keep
+        );
+        assert!(!or.excludes(&bounds()));
+        let or_both = Expr::Binary(
+            BinaryOp::Or,
+            Box::new(cmp(BinaryOp::Eq, 0, 5)), // prune
+            Box::new(cmp(BinaryOp::Eq, 1, 999)), // prune
+        );
+        assert!(or_both.excludes(&bounds()));
+    }
+
+    #[test]
+    fn excludes_is_conservative_without_bounds() {
+        // No bounds recorded for a column, or a non-comparison predicate → keep.
+        let no_bounds = vec![None, None];
+        assert!(!cmp(BinaryOp::Eq, 0, 5).excludes(&no_bounds));
+        assert!(!cmp(BinaryOp::Eq, 9, 5).excludes(&bounds())); // out-of-range column
     }
 
     #[test]

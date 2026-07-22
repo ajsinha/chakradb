@@ -170,6 +170,12 @@ impl Part {
         self.col_bounds.get(col).and_then(|b| b.as_ref())
     }
 
+    /// Every column's zonemap `(min, max)` bounds, indexed by column — for
+    /// predicate-based part pruning ([`crate::sql::expr::Expr::excludes`]).
+    pub fn col_bounds_all(&self) -> &[Option<(Value, Value)>] {
+        &self.col_bounds
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }

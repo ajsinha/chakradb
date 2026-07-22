@@ -128,6 +128,15 @@ impl SqlEngine {
                 {
                     let key_index = plan_key_index(&self.backend, &plan);
                     if exec::prefers_vectorized(&plan, key_index) {
+                        // A predicate whose zonemaps prune most parts runs faster
+                        // on the pruning interpreter than a full columnar scan.
+                        if let Plan::Select { table, .. } = &plan {
+                            if let Ok(t) = self.backend.table(table) {
+                                if exec::prune_favors_interpreter(&plan, &t) {
+                                    return execute(&*self.backend, plan);
+                                }
+                            }
+                        }
                         return df::execute_query(&*self.backend, sql);
                     }
                 }
