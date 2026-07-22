@@ -89,7 +89,7 @@ pub mod table;
 pub mod value;
 pub mod wal;
 
-pub use backpressure::{Backpressure, BackpressureConfig};
+pub use backpressure::{Backpressure, BackpressureConfig, Pressure};
 pub use batch::Batch;
 pub use clock::{Clock, RealClock, SimClock};
 pub use csn::{Csn, CsnGenerator, Snapshot};
@@ -102,7 +102,7 @@ pub use posix::{PosixIo, TempDir};
 pub use rng::Rng;
 pub use schema::{ColumnDef, Row, Schema};
 pub use sql::SqlEngine;
-pub use storage::{Storage, StorageConfig};
+pub use storage::{Storage, StorageConfig, StorageStats};
 pub use table::{Table, TableConfig, TableStats};
 pub use value::{DataType, Key, Value};
 

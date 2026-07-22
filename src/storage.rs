@@ -6,9 +6,10 @@
 //! records beyond `checkpoint_csn`; parts are already durable and named by the
 //! manifest (FR-06a), and are faulted in lazily on open (FR-06b, see `pager`).
 
-use crate::backpressure::Backpressure;
+use crate::backpressure::{Backpressure, Pressure};
 use crate::clock::RealClock;
 use crate::csn::Csn;
+use crate::table::TableStats;
 use crate::database::Database;
 use crate::durability::Durability;
 use crate::error::{Error, Result};
@@ -298,6 +299,42 @@ impl Storage {
     pub fn wal(&self) -> &Wal {
         &self.wal
     }
+
+    /// A point-in-time operational snapshot of the whole store — the numbers an
+    /// operator needs to reason about memory, durability lag, and ingest health.
+    /// Cheap: aggregates per-table stats and counters under brief read locks; no
+    /// scan. See [`StorageStats`].
+    pub fn stats(&self) -> StorageStats {
+        self.warm();
+        let names = self.db.table_names();
+        let tables_detail: Vec<TableStats> = names
+            .iter()
+            .filter_map(|n| self.db.table(n).ok().map(|t| t.stats()))
+            .collect();
+
+        let sum = |f: fn(&TableStats) -> usize| tables_detail.iter().map(f).sum();
+        let max_table_parts = tables_detail.iter().map(|t| t.num_parts).max().unwrap_or(0);
+        let current_csn = self.db.snapshot().csn;
+        let checkpoint_csn = self.state.lock().unwrap().checkpoint_csn;
+
+        StorageStats {
+            tables: names.len(),
+            parts: sum(|t| t.num_parts),
+            part_rows: sum(|t| t.part_rows),
+            l0_rows: sum(|t| t.l0_rows),
+            tombstones: sum(|t| t.tombstones),
+            resident_index_bytes: sum(|t| t.index_bytes),
+            resident_data_bytes: sum(|t| t.data_bytes + t.l0_bytes),
+            current_csn,
+            checkpoint_csn,
+            checkpoint_lag_csn: current_csn.saturating_sub(checkpoint_csn),
+            wal_written_bytes: self.wal.written_bytes(),
+            checkpoint_due: self.checkpoint_due(),
+            max_table_parts,
+            pressure: self.backpressure.evaluate(max_table_parts),
+            tables_detail,
+        }
+    }
     pub fn durability(&self) -> Durability {
         self.wal.mode()
     }
@@ -551,8 +588,58 @@ impl Storage {
     }
 
     /// Run compaction across all tables, then persist the result.
+    ///
+    /// Uses the **current** version clock as the reclamation horizon, which is
+    /// safe only when no snapshot older than now is outstanding — i.e. no
+    /// long-running reader or open transaction. Because compaction is
+    /// caller-driven, invoke this during a quiescent moment (no concurrent
+    /// long-lived readers), or drive [`Database::compact_all`] directly with a
+    /// horizon you know to be safe. See `docs/requirements.md` §2.2.
     pub fn compact_all(&self) -> usize {
         let horizon = self.db.snapshot().csn;
         self.db.compact_all(horizon)
     }
+}
+
+/// A point-in-time operational view of a [`Storage`] (see [`Storage::stats`]).
+/// These are the signals an operator watches: memory footprint, durability lag,
+/// and ingest backpressure.
+#[derive(Debug, Clone)]
+pub struct StorageStats {
+    /// Tables in the catalog.
+    pub tables: usize,
+    /// Sealed parts across all tables.
+    pub parts: usize,
+    /// Rows in sealed parts (may include superseded versions not yet compacted).
+    pub part_rows: usize,
+    /// Rows buffered in L0 (not yet sealed).
+    pub l0_rows: usize,
+    /// Deleted rows still occupying space (reclaimed by compaction).
+    pub tombstones: usize,
+    /// Resident **index** memory across parts — Bloom + zonemaps + version stamps
+    /// + deletion vectors, ~1.25 B/row. This, not disk, is the scaling ceiling.
+    pub resident_index_bytes: usize,
+    /// Resident part **data** currently in memory (in-memory parts, faulted-in
+    /// durable parts, and L0 buffers).
+    pub resident_data_bytes: usize,
+    /// The current committed version-clock value.
+    pub current_csn: Csn,
+    /// The CSN through which the last checkpoint made state durable.
+    pub checkpoint_csn: Csn,
+    /// `current_csn - checkpoint_csn` — how far behind the checkpoint is, i.e. how
+    /// much WAL a recovery would replay. Growing lag means checkpoints aren't
+    /// keeping up.
+    pub checkpoint_lag_csn: u64,
+    /// Bytes appended to the WAL (its on-disk size to be replayed on recovery).
+    pub wal_written_bytes: u64,
+    /// Whether the WAL has grown past the checkpoint threshold.
+    pub checkpoint_due: bool,
+    /// The largest sealed-part count in any one table — the compaction-debt hot
+    /// spot and the input to backpressure.
+    pub max_table_parts: usize,
+    /// Ingest backpressure evaluated at `max_table_parts`: `None`, `Throttle`, or
+    /// `Stall`. Anything but `None` means compaction is falling behind ingest.
+    pub pressure: Pressure,
+    /// Per-table breakdown.
+    pub tables_detail: Vec<TableStats>,
 }

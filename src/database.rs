@@ -136,6 +136,13 @@ impl Database {
     }
 
     /// Run compaction across every table. Returns total parts merged.
+    ///
+    /// **`horizon` must be the oldest CSN any live snapshot may still read.**
+    /// Compaction physically reclaims rows deleted at or before `horizon`; if a
+    /// reader holds a snapshot older than `horizon`, that reader can lose rows it
+    /// should still see. Compaction is caller-driven (there is no background
+    /// thread), so the caller is responsible for passing a safe `horizon` — e.g.
+    /// [`Database::snapshot`]'s CSN only when no older snapshot is outstanding.
     pub fn compact_all(&self, horizon: Csn) -> usize {
         self.tables
             .read()

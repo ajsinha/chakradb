@@ -224,6 +224,18 @@ Know these before you reach for it. ChakraDB is deliberately scoped; the wedge
   table count, not within a single table.
 - Durable commits serialize through one WAL append point (group commit amortizes
   the `fsync`).
+- **Compaction is caller-driven and uses the current version clock as its GC
+  horizon.** There is no background compactor, so versions accumulate until you
+  call `Storage::compact_all()`. That call reclaims space safely **only when no
+  snapshot older than "now" is live** — don't compact while a long-running reader
+  or open transaction holds an older snapshot, or it can lose rows deleted after
+  that snapshot. (A live-snapshot registry to make this automatic is planned; see
+  `requirements.md` §2.2.)
+
+**Observability**
+- `Storage::stats()` returns a `StorageStats` snapshot — table/part/row counts,
+  resident index bytes (the scaling ceiling), tombstones, checkpoint lag, WAL
+  size, and ingest backpressure — cheaply, without a scan.
 
 **Process model**
 - **Embedded, single process.** "Concurrent users" means threads in your

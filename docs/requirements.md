@@ -239,6 +239,24 @@ pool / LRU (§7.3 explains why — parts are immutable and whole-part granular).
   one table. A single hot table is a single-writer bottleneck by design.
 - Durable commits funnel through one WAL append mutex; group commit amortizes the
   `fsync` across concurrent committers (§7.2).
+- **GC watermark — a known gap.** Compaction (`§5.4`) reclaims rows deleted at or
+  before a `horizon` CSN, and `plan_merge` documents that horizon as *"the oldest
+  CSN any live snapshot may observe."* But the public entry points
+  (`Storage::compact_all`, `Database::compact_all`) pass the **current** clock,
+  and no live-snapshot registry exists to compute the true oldest. Because
+  compaction is **caller-driven** (no background thread), the exposure is bounded:
+  it only misreclaims if you *explicitly* compact while a reader holds an older
+  snapshot. The APIs now document this precondition; the proper fix — track the
+  oldest outstanding snapshot and derive a safe horizon — is a planned hardening
+  item. Until then, compact during quiescent moments.
+
+**Observability**
+
+- `Storage::stats() -> StorageStats` gives an operator a cheap point-in-time view
+  (no scan): table/part/row counts, resident **index** bytes (§5.2 — the scaling
+  ceiling), tombstone count, `current_csn`/`checkpoint_csn` and their lag (WAL
+  replay debt), WAL size, `checkpoint_due`, and ingest backpressure. Per-table
+  detail is included.
 
 **Process model**
 

@@ -352,11 +352,15 @@ revisit the architecture *before* starting this milestone, not during it.
 
 > **Status.** Underway. Done so far: a no-panic public-API audit with the
 > overflow paths hardened (date/time parsing, negation); the single-writer
-> directory lock (C-1); `COPY` bulk ingest; `DECIMAL` precision enforcement; the
+> directory lock (C-1); `COPY` bulk ingest; `DECIMAL` precision enforcement; an
+> **operational-metrics surface** (`Storage::stats() -> StorageStats`); the
 > operating-envelope + limitations docs (§2.2, README); and the SQL-surface
-> reference (`sql-reference.md`). Remaining: multi-day soak (the 6-hour M1-3 run),
-> GC-watermark management, operational metrics surface, file-format versioning
-> policy, backup/restore, and publishing the Python wheel to PyPI.
+> reference (`sql-reference.md`). The **GC-watermark** gap is now identified and
+> documented (compaction's horizon uses the current clock; the caller-driven
+> precondition is spelled out on the public APIs) — the proper fix (a
+> live-snapshot registry) is scoped but not built. Remaining: that registry, the
+> multi-day soak (the 6-hour M1-3 run), file-format versioning policy,
+> backup/restore, and publishing the Python wheel to PyPI.
 
 **Goal:** make it something a stranger can run in production.
 
