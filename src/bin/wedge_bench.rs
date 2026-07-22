@@ -14,7 +14,7 @@
 
 use chakradb::io::MemIo;
 use chakradb::storage::{Storage, StorageConfig};
-use chakradb::{Row, Rng, SqlEngine, Value};
+use chakradb::{Rng, Row, SqlEngine, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;

@@ -229,5 +229,58 @@ fn bulk_load_into_rowid_table_assigns_keys() {
         .map(|i| Row::from_values(vec![Value::Int(i), Value::Null]))
         .collect();
     t.bulk_load(rows);
-    assert_eq!(t.row_count(db.snapshot()), 1000, "rowids assigned, all distinct");
+    assert_eq!(
+        t.row_count(db.snapshot()),
+        1000,
+        "rowids assigned, all distinct"
+    );
+}
+
+#[test]
+fn column_minmax_zonemap_is_mvcc_correct() {
+    let (db, t) = table(); // default schema; row(pk) has column 1 (a) = pk*2
+    for pk in 0..100 {
+        t.insert(row(pk)).unwrap();
+    }
+    t.seal();
+    let snap = db.snapshot();
+    // Answered from the clean part's zonemap: a in [0, 198].
+    assert_eq!(
+        t.column_minmax(1, snap),
+        Some((Value::Int(0), Value::Int(198)))
+    );
+
+    // Delete the rows holding the min (pk=0) and max (pk=99) of column a.
+    t.delete(&Value::Int(0)).unwrap();
+    t.delete(&Value::Int(99)).unwrap();
+    let snap2 = db.snapshot();
+    // The part is now partially visible → scanned for exact visible bounds.
+    assert_eq!(
+        t.column_minmax(1, snap2),
+        Some((Value::Int(2), Value::Int(196)))
+    );
+    // The earlier snapshot still sees the original bounds (snapshot isolation).
+    assert_eq!(
+        t.column_minmax(1, snap),
+        Some((Value::Int(0), Value::Int(198)))
+    );
+}
+
+#[test]
+fn column_minmax_matches_a_full_scan() {
+    let (db, t) = table();
+    for pk in [7, 3, 91, 40, 12, 88] {
+        t.insert(row(pk)).unwrap();
+    }
+    // Across L0 (unsealed) and a sealed part.
+    t.seal();
+    for pk in [200, 1, 150] {
+        t.insert(row(pk)).unwrap();
+    }
+    let snap = db.snapshot();
+    // Column a = pk*2: min at pk=1 (2), max at pk=200 (400).
+    assert_eq!(
+        t.column_minmax(1, snap),
+        Some((Value::Int(2), Value::Int(400)))
+    );
 }

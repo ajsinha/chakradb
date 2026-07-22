@@ -59,6 +59,21 @@ impl Segment {
     }
 }
 
+/// Merge two optional `(min, max)` bounds into one.
+fn combine_bounds(
+    acc: Option<(Value, Value)>,
+    b: Option<(Value, Value)>,
+) -> Option<(Value, Value)> {
+    match (acc, b) {
+        (a, None) => a,
+        (None, Some(x)) => Some(x),
+        (Some((amn, amx)), Some((mn, mx))) => Some((
+            if mn.total_cmp(&amn).is_lt() { mn } else { amn },
+            if mx.total_cmp(&amx).is_gt() { mx } else { amx },
+        )),
+    }
+}
+
 /// Where the live version of a key currently lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Location {
@@ -340,6 +355,31 @@ impl Table {
             segs.push(Segment::Owned(l0_rows));
         }
         segs
+    }
+
+    /// Min and max of a column over the rows visible to `snap`, ignoring NULLs
+    /// (`None` if there are none). Answered from per-part **zonemaps** for
+    /// fully-visible parts — no scan — and by scanning only the visible subset of
+    /// partially-visible parts and L0. This is the metadata path that makes bare
+    /// `MIN`/`MAX` near-instant on cold data.
+    pub fn column_minmax(&self, col: usize, snap: Snapshot) -> Option<(Value, Value)> {
+        let (parts, l0_rows) = {
+            let inner = self.inner.read().unwrap();
+            (inner.parts.clone(), inner.l0.scan(snap))
+        };
+        Metrics::bump(&self.metrics.scans);
+        let mut acc = None;
+        for p in &parts {
+            let b = if p.is_fully_visible_to(snap) {
+                Metrics::bump(&self.metrics.scan_fast_path);
+                p.col_bounds(col).cloned()
+            } else {
+                Metrics::bump(&self.metrics.scan_slow_path);
+                p.scan(snap).column_bounds(col)
+            };
+            acc = combine_bounds(acc, b);
+        }
+        combine_bounds(acc, l0_rows.column_bounds(col))
     }
 
     /// Number of visible rows, without materialising them.

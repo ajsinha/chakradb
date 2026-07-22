@@ -109,6 +109,9 @@ pub struct Part {
     /// Key bounds (of any type), `Null` when the part is empty.
     min_key: Value,
     max_key: Value,
+    /// Per-column min/max zonemap (`None` for empty/all-NULL columns), so bare
+    /// MIN/MAX and part pruning can skip the scan for clean parts.
+    col_bounds: Vec<Option<(Value, Value)>>,
     bloom: crate::bloom::BloomFilter,
     dv: RwLock<DeleteVector>,
 }
@@ -142,6 +145,9 @@ impl Part {
         };
 
         let bloom = crate::bloom::BloomFilter::build_values(&batch.keys());
+        let col_bounds = (0..batch.schema().arity())
+            .map(|c| batch.column_bounds(c))
+            .collect();
 
         Part {
             id,
@@ -151,9 +157,17 @@ impl Part {
             created_max,
             min_key,
             max_key,
+            col_bounds,
             bloom,
             dv: RwLock::new(DeleteVector::new()),
         }
+    }
+
+    /// The zonemap `(min, max)` of column `col` over *all* rows in this part
+    /// (ignoring visibility). Exact for the visible set only when the part is
+    /// fully visible to the querying snapshot.
+    pub fn col_bounds(&self, col: usize) -> Option<&(Value, Value)> {
+        self.col_bounds.get(col).and_then(|b| b.as_ref())
     }
 
     pub fn id(&self) -> u64 {

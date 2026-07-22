@@ -131,6 +131,35 @@ impl Batch {
         (1..self.len()).all(|i| self.key(i - 1).total_cmp(&self.key(i)).is_le())
     }
 
+    /// Min and max of a column, ignoring NULLs — the zonemap for one column.
+    /// `None` if the column is empty or entirely NULL. Uses Arrow's vectorised
+    /// aggregate kernels, so it is cheap even over large batches.
+    pub fn column_bounds(&self, col: usize) -> Option<(Value, Value)> {
+        use arrow::compute::{max, max_boolean, max_string, min, min_boolean, min_string};
+        let arr = self.rb.column(col);
+        match self.schema.column(col).ty {
+            DataType::Int => {
+                let a = arr.as_any().downcast_ref::<Int64Array>()?;
+                Some((Value::Int(min(a)?), Value::Int(max(a)?)))
+            }
+            DataType::Float => {
+                let a = arr.as_any().downcast_ref::<Float64Array>()?;
+                Some((Value::Float(min(a)?), Value::Float(max(a)?)))
+            }
+            DataType::Text => {
+                let a = arr.as_any().downcast_ref::<StringArray>()?;
+                Some((
+                    Value::Text(min_string(a)?.to_string()),
+                    Value::Text(max_string(a)?.to_string()),
+                ))
+            }
+            DataType::Bool => {
+                let a = arr.as_any().downcast_ref::<BooleanArray>()?;
+                Some((Value::Bool(min_boolean(a)?), Value::Bool(max_boolean(a)?)))
+            }
+        }
+    }
+
     /// Encode the columns as an Arrow IPC stream (the open on-disk part format).
     pub fn to_ipc(&self) -> Vec<u8> {
         let mut buf = Vec::new();

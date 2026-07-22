@@ -145,6 +145,37 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
         });
     }
 
+    // Metadata fast path: bare `MIN(col)` / `MAX(col)` with no filter or grouping
+    // is answered from per-part column zonemaps — no scan for clean parts. This
+    // is the DuckDB-style min/max shortcut.
+    if is_bare_minmax(&projections, &filter, &group_by, distinct) {
+        let columns: Vec<String> = projections
+            .iter()
+            .map(|p| match p {
+                Projection::Expr(_, l) | Projection::Agg(_, _, l) => l.clone(),
+            })
+            .collect();
+        let mut types = Vec::with_capacity(projections.len());
+        let mut rendered = Vec::with_capacity(projections.len());
+        for p in &projections {
+            let Projection::Agg(f, Some(col), _) = p else {
+                unreachable!()
+            };
+            let v = match (f, t.column_minmax(*col, snap)) {
+                (AggFn::Min, Some((mn, _))) => mn,
+                (AggFn::Max, Some((_, mx))) => mx,
+                _ => Value::Null, // empty / all-NULL column
+            };
+            types.push(v.type_char());
+            rendered.push(v.render());
+        }
+        return Ok(Outcome::Rows {
+            columns,
+            types,
+            rows: vec![rendered],
+        });
+    }
+
     // Point-lookup fast path: `WHERE key = literal` with no grouping/aggregation
     // resolves through the index funnel (bounds → bloom → binary search) instead
     // of scanning — O(log n), the transactional read path.
@@ -420,6 +451,23 @@ fn is_bare_count_star(
         && matches!(projections[0], Projection::Agg(AggFn::Count, None, _))
 }
 
+/// Every projection is a bare `MIN(col)` / `MAX(col)`, with no filter, grouping,
+/// or DISTINCT — the case the zonemap metadata path answers without scanning.
+fn is_bare_minmax(
+    projections: &[Projection],
+    filter: &Option<Expr>,
+    group_by: &[usize],
+    distinct: bool,
+) -> bool {
+    filter.is_none()
+        && group_by.is_empty()
+        && !distinct
+        && !projections.is_empty()
+        && projections
+            .iter()
+            .all(|p| matches!(p, Projection::Agg(AggFn::Min | AggFn::Max, Some(_), _)))
+}
+
 /// If this query is a point lookup on the key column — `WHERE key = <literal>`
 /// with no grouping, aggregation, or DISTINCT — return the key value. Such a
 /// query is answered through the index funnel, not a scan.
@@ -468,6 +516,9 @@ pub(crate) fn prefers_vectorized(plan: &Plan, key_index: usize) -> bool {
     };
     if is_bare_count_star(projections, filter, group_by, order_by, *distinct) {
         return false;
+    }
+    if is_bare_minmax(projections, filter, group_by, *distinct) {
+        return false; // answered from zonemaps by the interpreter
     }
     if point_lookup_key(filter, group_by, *distinct, projections, key_index).is_some() {
         return false;

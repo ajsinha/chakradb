@@ -43,7 +43,8 @@ fn int_pk_trial(seed: u64, ops: usize) -> usize {
     {
         let s = Arc::new(Storage::open(io.clone(), config()).unwrap());
         let e = SqlEngine::durable(s);
-        e.run("CREATE TABLE t (id INT PRIMARY KEY, tag TEXT, n INT)").unwrap();
+        e.run("CREATE TABLE t (id INT PRIMARY KEY, tag TEXT, n INT)")
+            .unwrap();
 
         let crash_at = rng.below(ops as u64) as usize;
         for i in 0..ops {
@@ -80,7 +81,11 @@ fn int_pk_trial(seed: u64, ops: usize) -> usize {
         let got = t
             .get(&Value::Int(*pk), snap)
             .unwrap_or_else(|| panic!("seed {seed}: acked id={pk} lost after crash"));
-        assert_eq!(got.get(1), &Value::Text(tag.clone()), "seed {seed}: id={pk} stale tag");
+        assert_eq!(
+            got.get(1),
+            &Value::Text(tag.clone()),
+            "seed {seed}: id={pk} stale tag"
+        );
         assert_eq!(got.get(2), &Value::Int(*n), "seed {seed}: id={pk} stale n");
     }
     for pk in 0..200i64 {
@@ -104,7 +109,8 @@ fn text_pk_trial(seed: u64, ops: usize) -> usize {
     {
         let s = Arc::new(Storage::open(io.clone(), config()).unwrap());
         let e = SqlEngine::durable(s);
-        e.run("CREATE TABLE users (name TEXT PRIMARY KEY, n INT)").unwrap();
+        e.run("CREATE TABLE users (name TEXT PRIMARY KEY, n INT)")
+            .unwrap();
 
         let crash_at = rng.below(ops as u64) as usize;
         for i in 0..ops {
@@ -123,7 +129,9 @@ fn text_pk_trial(seed: u64, ops: usize) -> usize {
                     expected.insert(name, n);
                     acked += 1;
                 }
-            } else if e.run(&format!("DELETE FROM users WHERE name = '{name}'")).is_ok()
+            } else if e
+                .run(&format!("DELETE FROM users WHERE name = '{name}'"))
+                .is_ok()
                 && expected.remove(&name).is_some()
             {
                 acked += 1;
@@ -139,7 +147,11 @@ fn text_pk_trial(seed: u64, ops: usize) -> usize {
         let got = t
             .get(&Value::Text(name.clone()), snap)
             .unwrap_or_else(|| panic!("seed {seed}: acked name={name} lost"));
-        assert_eq!(got.get(1), &Value::Int(*n), "seed {seed}: name={name} stale");
+        assert_eq!(
+            got.get(1),
+            &Value::Int(*n),
+            "seed {seed}: name={name} stale"
+        );
     }
     acked
 }
@@ -175,7 +187,11 @@ fn rowid_trial(seed: u64, ops: usize) -> usize {
     let n = t.row_count(snap);
     // Every acknowledged insert survived, and the state is internally consistent.
     assert_eq!(n, acked, "seed {seed}: rowid table lost/gained rows");
-    assert_eq!(t.scan(snap).len(), n, "seed {seed}: inconsistent after recovery");
+    assert_eq!(
+        t.scan(snap).len(),
+        n,
+        "seed {seed}: inconsistent after recovery"
+    );
     acked
 }
 

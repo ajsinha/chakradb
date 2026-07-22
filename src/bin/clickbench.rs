@@ -13,7 +13,7 @@
 //! If <csv> does not exist it is generated first. Then `scripts/clickbench_duckdb.sh
 //! <csv> <runs>` runs the identical queries on DuckDB.
 
-use chakradb::{ColumnDef, DataType, Database, Row, Rng, Schema, SqlEngine, Value};
+use chakradb::{ColumnDef, DataType, Database, Rng, Row, Schema, SqlEngine, Value};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::Arc;
 use std::time::Instant;
@@ -62,7 +62,10 @@ fn schema_cols() -> Vec<(String, DataType)> {
 }
 
 fn chakra_schema(cols: &[(String, DataType)]) -> Schema {
-    let defs: Vec<ColumnDef> = cols.iter().map(|(n, t)| ColumnDef::new(n.clone(), *t)).collect();
+    let defs: Vec<ColumnDef> = cols
+        .iter()
+        .map(|(n, t)| ColumnDef::new(n.clone(), *t))
+        .collect();
     // WatchID (column 0) is the primary key.
     Schema::from_user_columns(defs, Some(0))
 }
@@ -84,34 +87,34 @@ fn gen_row(i: i64, n: i64, rng: &mut Rng) -> Vec<String> {
     };
     let adv = if r(rng, 10) < 9 { 0 } else { r(rng, 5) + 1 };
     let mut f: Vec<String> = vec![
-        i.to_string(),                              // WatchID (pk)
-        r(rng, 2).to_string(),                      // JavaEnable
-        format!("t{}", r(rng, 10000)),              // Title
-        "1".into(),                                 // GoodEvent
-        (1_600_000_000 + r(rng, n)).to_string(),    // EventTime
-        (19000 + r(rng, 365)).to_string(),          // EventDate
-        r(rng, 1000).to_string(),                   // CounterID
-        r(rng, 1_000_000).to_string(),              // ClientIP
-        r(rng, 100).to_string(),                    // RegionID
-        r(rng, uid_space).to_string(),              // UserID
-        r(rng, 3).to_string(),                      // CounterClass
-        r(rng, 10).to_string(),                     // OS
-        r(rng, 20).to_string(),                     // UserAgent
-        format!("http://s{}", r(rng, 100000)),      // URL
-        format!("http://r{}", r(rng, 50000)),       // Referer
-        r(rng, 2).to_string(),                      // IsRefresh
-        r(rng, 2560).to_string(),                   // ResolutionWidth
-        r(rng, 1440).to_string(),                   // ResolutionHeight
-        search,                                     // SearchPhrase
-        r(rng, 20).to_string(),                     // SearchEngineID
-        adv.to_string(),                            // AdvEngineID
-        is_mobile.to_string(),                      // IsMobile
-        phone,                                      // MobilePhoneModel
-        r(rng, 100).to_string(),                    // Age
-        r(rng, 2).to_string(),                      // Sex
-        r(rng, 10).to_string(),                     // Income
-        r(rng, 2560).to_string(),                   // WindowClientWidth
-        r(rng, 1440).to_string(),                   // WindowClientHeight
+        i.to_string(),                           // WatchID (pk)
+        r(rng, 2).to_string(),                   // JavaEnable
+        format!("t{}", r(rng, 10000)),           // Title
+        "1".into(),                              // GoodEvent
+        (1_600_000_000 + r(rng, n)).to_string(), // EventTime
+        (19000 + r(rng, 365)).to_string(),       // EventDate
+        r(rng, 1000).to_string(),                // CounterID
+        r(rng, 1_000_000).to_string(),           // ClientIP
+        r(rng, 100).to_string(),                 // RegionID
+        r(rng, uid_space).to_string(),           // UserID
+        r(rng, 3).to_string(),                   // CounterClass
+        r(rng, 10).to_string(),                  // OS
+        r(rng, 20).to_string(),                  // UserAgent
+        format!("http://s{}", r(rng, 100000)),   // URL
+        format!("http://r{}", r(rng, 50000)),    // Referer
+        r(rng, 2).to_string(),                   // IsRefresh
+        r(rng, 2560).to_string(),                // ResolutionWidth
+        r(rng, 1440).to_string(),                // ResolutionHeight
+        search,                                  // SearchPhrase
+        r(rng, 20).to_string(),                  // SearchEngineID
+        adv.to_string(),                         // AdvEngineID
+        is_mobile.to_string(),                   // IsMobile
+        phone,                                   // MobilePhoneModel
+        r(rng, 100).to_string(),                 // Age
+        r(rng, 2).to_string(),                   // Sex
+        r(rng, 10).to_string(),                  // Income
+        r(rng, 2560).to_string(),                // WindowClientWidth
+        r(rng, 1440).to_string(),                // WindowClientHeight
     ];
     // Filler values.
     for ci in f.len()..105 {
@@ -230,8 +233,14 @@ fn median_ms(engine: &SqlEngine, sql: &str, runs: usize) -> (f64, usize, String)
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let csv = args.get(1).cloned().unwrap_or_else(|| "/tmp/clickbench.csv".to_string());
-    let n: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let csv = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "/tmp/clickbench.csv".to_string());
+    let n: i64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
     let runs: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
 
     let cols = schema_cols();
@@ -243,16 +252,18 @@ fn main() {
     }
 
     let db = Arc::new(Database::new());
-    db.create_table_schema("hits", chakra_schema(&cols)).unwrap();
+    db.create_table_schema("hits", chakra_schema(&cols))
+        .unwrap();
     let t0 = Instant::now();
     let loaded = load(&db, &csv, &cols);
     let load_s = t0.elapsed().as_secs_f64();
     let engine = SqlEngine::new(db);
 
-    println!("# ChakraDB + DataFusion — ClickBench-shaped ({} columns)", cols.len());
     println!(
-        "Loaded {loaded} rows from {csv} in {load_s:.1}s. Median of {runs} runs.\n"
+        "# ChakraDB + DataFusion — ClickBench-shaped ({} columns)",
+        cols.len()
     );
+    println!("Loaded {loaded} rows from {csv} in {load_s:.1}s. Median of {runs} runs.\n");
     println!("| query | ChakraDB p50 (ms) | rows | first-row |");
     println!("|---|---|---|---|");
     for (label, sql) in queries() {
