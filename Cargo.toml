@@ -79,3 +79,9 @@ name = "clickbench"
 path = "src/bin/clickbench.rs"
 required-features = ["datafusion"]
 
+# The concurrency wedge on the shipped stack: durable writers + DataFusion reads.
+[[bin]]
+name = "wedge-bench"
+path = "src/bin/wedge_bench.rs"
+required-features = ["datafusion"]
+

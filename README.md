@@ -127,9 +127,11 @@ assert_eq!(users.get_latest(&Value::Int(1)).unwrap().c(), "alice-v2");
 ## What's proven (with the harness that produced it)
 
 **The concurrency wedge.** DuckDB refuses a second writer (`Conflicting lock is
-held`). ChakraDB runs 4 writer threads applying ~37k concurrent upserts *while*
-analytical queries run — readers never block, snapshots never shift, including
-across the DataFusion handoff. (`m2-bench`, `df-bench`.)
+held`). On the shipped stack, ChakraDB runs 4 threads issuing **durable,
+WAL-logged** `INSERT`s — ~8,900 of them committed *during* the measurement —
+while a DataFusion `GROUP BY` runs repeatedly: query p50 degrades just **1.49×**
+(2.2 → 3.3 ms), readers never block, and every query sees a stable MVCC snapshot.
+(`wedge-bench`; also `m2-bench`, `df-bench`.)
 
 **Analytics at width and scale.** A 105-column ClickBench-shaped table, 1M rows:
 ChakraDB + DataFusion lands within ~1–2× of DuckDB on most queries (faster on a
