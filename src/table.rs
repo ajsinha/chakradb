@@ -161,6 +161,49 @@ impl Table {
         Ok(csn)
     }
 
+    /// Bulk-load many rows in one shot — the ingest fast path.
+    ///
+    /// Skips the per-row duplicate probe and the L0 buffer entirely: the rows are
+    /// sorted by key and written directly as sealed parts, all under one CSN.
+    /// This turns an O(n·parts) load (every row probing every part's Bloom filter)
+    /// into an O(n log n) sort plus a columnar build.
+    ///
+    /// **Caller guarantees the keys are new** (no collision with existing rows or
+    /// each other). For loading fresh data — seeding, restore, `COPY`-style ingest
+    /// — not for interleaved OLTP writes. Returns the CSN the rows were stamped
+    /// with.
+    pub fn bulk_load(&self, mut rows: Vec<Row>) -> Csn {
+        const PART_ROWS: usize = 128 * 1024;
+        let mut inner = self.inner.write().unwrap();
+        let csn = self.csn.allocate();
+
+        if self.schema.synthetic_key() {
+            let ki = self.schema.key_index();
+            for row in &mut rows {
+                if matches!(row.values[ki], Value::Null) {
+                    row.values[ki] = Value::Int(inner.next_rowid);
+                    inner.next_rowid += 1;
+                }
+            }
+        }
+
+        let ki = self.schema.key_index();
+        rows.sort_by(|a, b| a.key(ki).total_cmp(b.key(ki)));
+
+        let n = rows.len();
+        // Chunk into parts so DataFusion still has several Arrow batches to
+        // parallelise scans across, rather than one monolithic part.
+        for chunk in rows.chunks(PART_ROWS) {
+            let batch = Batch::from_rows(&self.schema, chunk);
+            let id = inner.next_part_id;
+            inner.next_part_id += 1;
+            let part = Part::new(id, batch, CreatedCsns::Uniform(csn));
+            inner.parts.insert(0, Arc::new(part));
+        }
+        Metrics::add(&self.metrics.inserts, n as u64);
+        csn
+    }
+
     /// Insert, returning the stored row (with any assigned `_rowid`) so a durable
     /// caller can log to the WAL exactly what was applied. Otherwise identical to
     /// [`Table::insert`].

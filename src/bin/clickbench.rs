@@ -148,9 +148,11 @@ fn parse_field(s: &str, ty: DataType) -> Value {
 }
 
 fn load(db: &Arc<Database>, path: &str, cols: &[(String, DataType)]) -> usize {
+    const CHUNK: usize = 256 * 1024;
     let t = db.table("hits").unwrap();
     let file = std::fs::File::open(path).expect("open csv");
     let mut n = 0;
+    let mut chunk: Vec<Row> = Vec::with_capacity(CHUNK);
     for (li, line) in BufReader::new(file).lines().enumerate() {
         let line = line.unwrap();
         if li == 0 {
@@ -161,8 +163,15 @@ fn load(db: &Arc<Database>, path: &str, cols: &[(String, DataType)]) -> usize {
             .zip(cols.iter())
             .map(|(s, (_, ty))| parse_field(s, *ty))
             .collect();
-        t.insert(Row::from_values(values)).unwrap();
-        n += 1;
+        chunk.push(Row::from_values(values));
+        if chunk.len() == CHUNK {
+            n += chunk.len();
+            t.bulk_load(std::mem::take(&mut chunk));
+        }
+    }
+    if !chunk.is_empty() {
+        n += chunk.len();
+        t.bulk_load(chunk);
     }
     n
 }

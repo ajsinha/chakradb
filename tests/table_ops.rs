@@ -198,3 +198,36 @@ fn stats_track_tombstones_and_reclamation() {
     assert_eq!(s.tombstones, 0, "compaction should clear tombstones");
     assert_eq!(s.total_rows(), 50, "and physically reclaim the rows");
 }
+
+#[test]
+fn bulk_load_ingests_and_is_queryable() {
+    let (db, t) = table();
+    // Load 5000 known-new rows in one shot (out of key order on purpose).
+    let rows: Vec<Row> = (0..5000).rev().map(row).collect();
+    t.bulk_load(rows);
+
+    let snap = db.snapshot();
+    assert_eq!(t.row_count(snap), 5000);
+    // Point lookups resolve through the sorted parts.
+    assert_eq!(t.get(&Value::Int(0), snap).unwrap().a(), 0);
+    assert_eq!(t.get(&Value::Int(4999), snap).unwrap().a(), 4999 * 2);
+    assert!(t.get(&Value::Int(5000), snap).is_none());
+    // A full scan returns every row.
+    assert_eq!(t.scan(snap).len(), 5000);
+    // Parts are chunked but each is key-sorted.
+    let (parts, _) = t.parts_snapshot();
+    assert!(parts.iter().all(|p| p.batch().is_sorted_by_key()));
+}
+
+#[test]
+fn bulk_load_into_rowid_table_assigns_keys() {
+    use chakradb::{ColumnDef, DataType, Schema};
+    let db = Database::new();
+    let schema = Schema::from_user_columns(vec![ColumnDef::new("v", DataType::Int)], None);
+    let t = db.create_table_schema("log", schema).unwrap();
+    let rows: Vec<Row> = (0..1000)
+        .map(|i| Row::from_values(vec![Value::Int(i), Value::Null]))
+        .collect();
+    t.bulk_load(rows);
+    assert_eq!(t.row_count(db.snapshot()), 1000, "rowids assigned, all distinct");
+}
