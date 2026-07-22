@@ -6,11 +6,15 @@ and an open, Arrow-native on-disk format.
 
 > **Status: working HTAP engine.** Arrow-native storage with arbitrary schemas,
 > a dual-execution SQL layer (interpreter + DataFusion) behind a cost-based
-> router, durable crash-safe SQL, and a real POSIX filesystem backend.
-> 458 tests green. The remaining frontier is scale hardening and packaging — not
-> capability. See [`docs/arrow-schema-migration.md`](docs/arrow-schema-migration.md)
-> and [`docs/m3-datafusion-spike.md`](docs/m3-datafusion-spike.md) for the recent
-> arc, and the `docs/m*-findings.md` for the earlier point-in-time records.
+> router, durable crash-safe SQL, ACID transactions (`BEGIN`/`COMMIT`/`ROLLBACK`
+> with first-committer-wins conflict detection), SQL constraints and types
+> (`NOT NULL`/`DEFAULT`/`CHECK`, `VARCHAR(n)`, `DATE`/`TIMESTAMP`, exact
+> `DECIMAL`), zonemap part pruning, and a real POSIX filesystem backend. The full
+> suite is green on both the DataFusion and lean profiles. The remaining frontier
+> is scale hardening and packaging — not capability. See
+> [`docs/arrow-schema-migration.md`](docs/arrow-schema-migration.md) and
+> [`docs/m3-datafusion-spike.md`](docs/m3-datafusion-spike.md) for the recent arc,
+> and the `docs/m*-findings.md` for the earlier point-in-time records.
 
 ---
 
@@ -80,11 +84,39 @@ rebuilds tables — including their schemas — from the manifest.
 
 ---
 
+## SQL surface
+
+- **DML/DDL:** `CREATE TABLE`, `INSERT` (positional or column-list, with
+  `DEFAULT`), `SELECT`, `UPDATE`, `DELETE`; `GROUP BY`, `ORDER BY`, `LIMIT`,
+  `DISTINCT`, aggregates (`COUNT`/`SUM`/`MIN`/`MAX`/`AVG`); joins, subqueries, and
+  window functions via DataFusion.
+- **Transactions:** `BEGIN` / `COMMIT` / `ROLLBACK` — snapshot isolation, a
+  private per-transaction overlay, crash-atomic commit (one WAL record), and
+  first-committer-wins conflict detection.
+- **Constraints:** `PRIMARY KEY` (single column, implicitly `NOT NULL`),
+  `NOT NULL`, `DEFAULT <literal>`, `CHECK (…)` (column- and table-level; fails
+  only on a definite FALSE, per SQL), and `VARCHAR(n)`/`CHAR(n)` length
+  (character-counted). `UPDATE` validates every row before applying any, so a
+  violation aborts the whole statement.
+- **Types:** `INT`, `FLOAT`/`DOUBLE`, `TEXT`/`VARCHAR`, `BOOLEAN`, `DATE`,
+  `TIMESTAMP`, and **exact `DECIMAL(p, s)`** — decimals are stored as an i128
+  mantissa (Arrow `Decimal128`), never `f64`, so money round-trips, compares, and
+  sums exactly (`0.1 + 0.2` is exactly `0.3`).
+- **Performance:** metadata `COUNT(*)`/`MIN`/`MAX` and key point-lookups answered
+  without a scan; **zonemap part pruning** skips parts a `WHERE` range can't
+  match; constraints reject bad writes before they touch the log.
+
+*Not supported:* composite primary keys, secondary indexes / `CREATE INDEX`,
+foreign keys (an explicit non-goal). Joins/subqueries/windows require the
+DataFusion feature and can't run inside a transaction.
+
+---
+
 ## Trying it
 
 ```bash
-cargo test                       # 458 tests (default: DataFusion + HTAP router)
-cargo test --no-default-features # 452 tests (lean interpreter-only, zero heavy deps)
+cargo test                       # default: DataFusion + HTAP router
+cargo test --no-default-features # lean interpreter-only, zero heavy deps
 ./scripts/qa.sh                  # full QA: fmt + clippy + both test profiles
 ./scripts/qa.sh full             # + 10k crash trials + benchmarks + DuckDB compare
 ```
@@ -145,10 +177,16 @@ while a DataFusion `GROUP BY` runs repeatedly: query p50 degrades just **1.49×*
 (2.2 → 3.3 ms), readers never block, and every query sees a stable MVCC snapshot.
 (`wedge-bench`; also `m2-bench`, `df-bench`.)
 
-**Analytics at width and scale.** A 105-column ClickBench-shaped table, 1M rows:
-ChakraDB + DataFusion lands within ~1–2× of DuckDB on most queries (faster on a
-few), with **identical results**. (`cargo run --release --features datafusion
---bin clickbench`; DuckDB half in `scripts/clickbench_duckdb.sh`.)
+**Analytics at width and scale.** A 105-column ClickBench-shaped table, from
+100k to **10M rows**: ChakraDB + DataFusion returns **identical results** to
+DuckDB and is competitive-to-winning at scale — at 10M it *beats* DuckDB on the
+big `COUNT(DISTINCT)`s (Q5 `SearchPhrase` 12 vs 36 ms, ~3×) and top-users, while
+DuckDB stays ahead on simple `GROUP BY`/top-K. A selective range scan on the
+sorted key is effectively O(1) in table size (~1 ms across a 100× row increase)
+thanks to zonemap pruning. Full head-to-head in
+[`docs/clickbench-findings.md`](docs/clickbench-findings.md).
+(`cargo run --release --features datafusion --bin clickbench`; DuckDB half in
+`scripts/clickbench_duckdb.sh`.)
 
 **Durability.** 10,000 randomized crash trials verify every acknowledged write
 survives, in all durability modes. Durable SQL adds **30,000 more crash trials
@@ -193,7 +231,7 @@ docs/
   m0/m1/m2-findings.md          Point-in-time milestone records (historical)
 src/                           Engine: storage, MVCC, WAL, SQL, DataFusion bridge
 bindings/python/               DB-API 2.0 (PEP 249) driver — works like sqlite3
-tests/                         20 integration suites + SQLancer/sqllogictest oracles
+tests/                         25 integration suites + SQLancer/sqllogictest oracles
 scripts/                       qa.sh + DuckDB comparison drivers
 ```
 
