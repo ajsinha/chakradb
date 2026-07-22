@@ -35,6 +35,10 @@ type ChangeSet = HashMap<String, BTreeMap<Key, Option<Row>>>;
 pub struct Transaction {
     real: Arc<dyn SqlBackend>,
     snapshot: Snapshot,
+    /// Keeps the begin-snapshot pinned on the real backend for the whole
+    /// transaction, so compaction cannot reclaim a version this transaction may
+    /// still materialise into its overlay.
+    _real_pin: crate::csn::SnapshotPin,
     overlay: Database,
     inner: Mutex<Inner>,
 }
@@ -56,10 +60,12 @@ struct Inner {
 impl Transaction {
     /// Open a transaction over `real`, pinned to its current committed snapshot.
     pub fn begin(real: Arc<dyn SqlBackend>) -> Self {
-        let snapshot = real.snapshot();
+        let real_pin = real.pin();
+        let snapshot = real_pin.snapshot();
         Transaction {
             real,
             snapshot,
+            _real_pin: real_pin,
             overlay: Database::new(),
             inner: Mutex::new(Inner::default()),
         }
@@ -175,6 +181,11 @@ impl SqlBackend for Transaction {
     fn snapshot(&self) -> Snapshot {
         // Reads run against the overlay, so its clock is the relevant one.
         self.overlay.snapshot()
+    }
+    fn pin(&self) -> crate::csn::SnapshotPin {
+        // Statements read the private overlay, which nothing compacts; the real
+        // backend is already pinned for the transaction's whole life (`_real_pin`).
+        self.overlay.pin()
     }
 
     fn insert(&self, table: &str, row: Row) -> Result<Csn> {

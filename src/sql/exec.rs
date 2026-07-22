@@ -246,7 +246,8 @@ fn exec_copy(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
 
 fn exec_delete(be: &dyn SqlBackend, table: &str, filter: Option<Expr>) -> Result<Outcome, Error> {
     let t = be.table(table)?;
-    let snap = be.snapshot();
+    let _snap_pin = be.pin();
+    let snap = _snap_pin.snapshot();
     let ki = t.schema().key_index();
     let victims: Vec<Value> = t
         .scan(snap)
@@ -270,7 +271,8 @@ fn exec_update(
     filter: Option<Expr>,
 ) -> Result<Outcome, Error> {
     let t = be.table(table)?;
-    let snap = be.snapshot();
+    let _snap_pin = be.pin();
+    let snap = _snap_pin.snapshot();
     let schema = t.schema().clone();
     let checks = super::plan::planned_checks(&schema).map_err(Error::Sql)?;
     let targets: Vec<Row> = t.scan(snap).iter().filter(|r| passes(&filter, r)).collect();
@@ -310,7 +312,8 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     };
 
     let t = be.table(&table)?;
-    let snap = be.snapshot();
+    let _snap_pin = be.pin();
+    let snap = _snap_pin.snapshot();
     // Output type per projection, so DATE/TIMESTAMP columns render as date
     // strings rather than their epoch integers. `render_as` is a no-op for every
     // other type, so a neutral default is safe for computed expressions.

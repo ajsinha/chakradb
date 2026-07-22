@@ -9,7 +9,9 @@
 //! concurrent index — contention on a single counter is far cheaper than the
 //! alternative, and M0-3 measures whether that holds.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A commit sequence number. Monotonically increasing, never reused.
 pub type Csn = u64;
@@ -22,16 +24,23 @@ pub const NEVER_DELETED: Csn = u64::MAX;
 /// makes an empty snapshot trivially see nothing.
 pub const FIRST_CSN: Csn = 1;
 
-/// Allocates commit sequence numbers.
+/// Allocates commit sequence numbers and tracks live read snapshots so garbage
+/// collection (compaction) never reclaims a version a live reader can still see.
 #[derive(Debug)]
 pub struct CsnGenerator {
     next: AtomicU64,
+    /// Live *pinned* snapshots: `csn -> number of pins at that csn`. Only reads
+    /// that must outlive a clock advance (queries, transactions) pin; a transient
+    /// read at `current` needs no entry, since nothing it can see is reclaimable.
+    /// The GC horizon is the smallest key here (the oldest live reader).
+    active: Mutex<BTreeMap<Csn, u64>>,
 }
 
 impl CsnGenerator {
     pub fn new() -> Self {
         CsnGenerator {
             next: AtomicU64::new(FIRST_CSN),
+            active: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -54,11 +63,71 @@ impl CsnGenerator {
         self.next.fetch_max(csn + 1, Ordering::SeqCst);
     }
 
-    /// Take a snapshot of the current committed state.
+    /// Take a snapshot of the current committed state. Lock-free; the snapshot is
+    /// **not** pinned, so it must be used immediately (a transient read). For a
+    /// snapshot that outlives a clock advance, use [`CsnGenerator::pin`].
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             csn: self.current(),
         }
+    }
+
+    /// Register a live snapshot at the current CSN and return an RAII guard.
+    /// While the guard is alive, [`CsnGenerator::gc_horizon`] will not exceed its
+    /// CSN, so compaction cannot reclaim any version this reader may observe.
+    ///
+    /// Reading `current` and registering happen under the same lock as
+    /// `gc_horizon`, so there is no window where a horizon could be computed above
+    /// a pin that is about to register at a lower CSN.
+    pub fn pin(self: &Arc<Self>) -> SnapshotPin {
+        let mut active = self.active.lock().unwrap();
+        let csn = self.current();
+        *active.entry(csn).or_insert(0) += 1;
+        drop(active);
+        SnapshotPin {
+            generator: self.clone(),
+            snapshot: Snapshot { csn },
+        }
+    }
+
+    fn release(&self, csn: Csn) {
+        let mut active = self.active.lock().unwrap();
+        if let Some(count) = active.get_mut(&csn) {
+            *count -= 1;
+            if *count == 0 {
+                active.remove(&csn);
+            }
+        }
+    }
+
+    /// The safe reclamation horizon: the oldest live pinned snapshot, or the
+    /// current CSN if none are pinned. Compaction must not reclaim versions a
+    /// snapshot at or above this CSN could see.
+    pub fn gc_horizon(&self) -> Csn {
+        let active = self.active.lock().unwrap();
+        active.keys().next().copied().unwrap_or_else(|| self.current())
+    }
+}
+
+/// An RAII guard keeping a read snapshot alive for garbage collection: while it
+/// exists, compaction will not reclaim any version the snapshot can observe.
+/// Dropping it releases the pin. See [`CsnGenerator::pin`].
+#[derive(Debug)]
+pub struct SnapshotPin {
+    generator: Arc<CsnGenerator>,
+    snapshot: Snapshot,
+}
+
+impl SnapshotPin {
+    /// The pinned snapshot.
+    pub fn snapshot(&self) -> Snapshot {
+        self.snapshot
+    }
+}
+
+impl Drop for SnapshotPin {
+    fn drop(&mut self) {
+        self.generator.release(self.snapshot.csn);
     }
 }
 

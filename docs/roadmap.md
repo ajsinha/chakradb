@@ -355,12 +355,13 @@ revisit the architecture *before* starting this milestone, not during it.
 > directory lock (C-1); `COPY` bulk ingest; `DECIMAL` precision enforcement; an
 > **operational-metrics surface** (`Storage::stats() -> StorageStats`); the
 > operating-envelope + limitations docs (§2.2, README); and the SQL-surface
-> reference (`sql-reference.md`). The **GC-watermark** gap is now identified and
-> documented (compaction's horizon uses the current clock; the caller-driven
-> precondition is spelled out on the public APIs) — the proper fix (a
-> live-snapshot registry) is scoped but not built. Remaining: that registry, the
-> multi-day soak (the 6-hour M1-3 run), file-format versioning policy,
-> backup/restore, and publishing the Python wheel to PyPI.
+> reference (`sql-reference.md`). The **GC-watermark** gap is **fixed**: a
+> live-snapshot registry (`Database::pin`/`gc_horizon`) holds compaction's
+> reclamation horizon back to the oldest pinned reader, so compacting while a
+> long-running query or transaction is in flight never reclaims a version it can
+> still see (`tests/gc_watermark.rs`). Remaining: the multi-day soak (the 6-hour
+> M1-3 run), file-format versioning policy, backup/restore, and publishing the
+> Python wheel to PyPI.
 
 **Goal:** make it something a stranger can run in production.
 

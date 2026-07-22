@@ -119,9 +119,25 @@ impl Database {
         self.csn.set_floor(csn);
     }
 
-    /// A snapshot consistent across every table.
+    /// A snapshot consistent across every table. Transient (not GC-pinned) — use
+    /// it immediately; for a snapshot held across writes, use [`Database::pin`].
     pub fn snapshot(&self) -> Snapshot {
         self.csn.snapshot()
+    }
+
+    /// Pin a live read snapshot: while the returned guard is held, compaction's
+    /// [`Database::gc_horizon`] will not advance past it, so no version the reader
+    /// can see is reclaimed. Hold it for the duration of a read (query,
+    /// transaction) that must outlive concurrent writes.
+    pub fn pin(&self) -> crate::csn::SnapshotPin {
+        self.csn.pin()
+    }
+
+    /// The safe compaction horizon: the oldest live pinned snapshot, or the
+    /// current CSN if none. Pass this to [`Database::compact_all`] to reclaim
+    /// only what no live reader can observe.
+    pub fn gc_horizon(&self) -> Csn {
+        self.csn.gc_horizon()
     }
 
     pub fn metrics(&self) -> &Metrics {
@@ -140,9 +156,9 @@ impl Database {
     /// **`horizon` must be the oldest CSN any live snapshot may still read.**
     /// Compaction physically reclaims rows deleted at or before `horizon`; if a
     /// reader holds a snapshot older than `horizon`, that reader can lose rows it
-    /// should still see. Compaction is caller-driven (there is no background
-    /// thread), so the caller is responsible for passing a safe `horizon` — e.g.
-    /// [`Database::snapshot`]'s CSN only when no older snapshot is outstanding.
+    /// should still see. Pass [`Database::gc_horizon`] for the safe value — it
+    /// respects live [`Database::pin`]s. (`Storage::compact_all` does this for
+    /// you.)
     pub fn compact_all(&self, horizon: Csn) -> usize {
         self.tables
             .read()

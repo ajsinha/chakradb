@@ -92,7 +92,7 @@ pub mod wal;
 pub use backpressure::{Backpressure, BackpressureConfig, Pressure};
 pub use batch::Batch;
 pub use clock::{Clock, RealClock, SimClock};
-pub use csn::{Csn, CsnGenerator, Snapshot};
+pub use csn::{Csn, CsnGenerator, Snapshot, SnapshotPin};
 pub use database::Database;
 pub use durability::Durability;
 pub use error::{Error, Result};

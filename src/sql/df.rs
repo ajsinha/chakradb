@@ -44,7 +44,10 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// Execute a read-only query through DataFusion over the catalog's current
 /// snapshot.
 pub fn execute_query(be: &dyn SqlBackend, sql: &str) -> Result<Outcome, Error> {
-    let snap = be.snapshot();
+    // Pin the snapshot for the whole query so concurrent compaction cannot
+    // reclaim a version this scan will read.
+    let pin = be.pin();
+    let snap = pin.snapshot();
     // Preserve identifier case: ChakraDB columns can be CamelCase (e.g. the
     // ClickBench schema), and DataFusion otherwise lowercases unquoted names,
     // which would fail to resolve `AdvEngineID`. DuckDB matches case-insensitively;

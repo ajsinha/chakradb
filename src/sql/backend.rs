@@ -6,7 +6,7 @@
 //! executor writes through a `SqlBackend`, and `SqlEngine` can be bound to either
 //! — an in-memory database for tests, or `Storage` for a durable SQL database.
 
-use crate::csn::{Csn, Snapshot};
+use crate::csn::{Csn, Snapshot, SnapshotPin};
 use crate::database::Database;
 use crate::error::Result;
 use crate::schema::{Row, Schema};
@@ -27,6 +27,10 @@ pub trait SqlBackend: Send + Sync {
     fn table_names(&self) -> Vec<String>;
     /// A snapshot consistent across the catalog.
     fn snapshot(&self) -> Snapshot;
+    /// Pin a read snapshot for the duration of a statement (or transaction), so
+    /// concurrent compaction cannot reclaim a version this read may observe. The
+    /// returned guard carries the snapshot; hold it for the whole read.
+    fn pin(&self) -> SnapshotPin;
     fn insert(&self, table: &str, row: Row) -> Result<Csn>;
     /// Insert or replace — used to replay a committed transaction's writes.
     fn upsert(&self, table: &str, row: Row) -> Result<Csn>;
@@ -82,6 +86,9 @@ impl SqlBackend for Database {
     fn snapshot(&self) -> Snapshot {
         Database::snapshot(self)
     }
+    fn pin(&self) -> SnapshotPin {
+        Database::pin(self)
+    }
     fn insert(&self, table: &str, row: Row) -> Result<Csn> {
         Database::table(self, table)?.insert(row)
     }
@@ -117,6 +124,10 @@ impl SqlBackend for Storage {
     }
     fn snapshot(&self) -> Snapshot {
         self.database().snapshot()
+    }
+    fn pin(&self) -> SnapshotPin {
+        self.warm();
+        self.database().pin()
     }
     fn insert(&self, table: &str, row: Row) -> Result<Csn> {
         Storage::insert(self, table, row)

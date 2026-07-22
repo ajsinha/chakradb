@@ -589,14 +589,11 @@ impl Storage {
 
     /// Run compaction across all tables, then persist the result.
     ///
-    /// Uses the **current** version clock as the reclamation horizon, which is
-    /// safe only when no snapshot older than now is outstanding — i.e. no
-    /// long-running reader or open transaction. Because compaction is
-    /// caller-driven, invoke this during a quiescent moment (no concurrent
-    /// long-lived readers), or drive [`Database::compact_all`] directly with a
-    /// horizon you know to be safe. See `docs/requirements.md` §2.2.
+    /// Reclaims only versions no live reader can observe: the horizon is the
+    /// oldest pinned snapshot ([`Database::gc_horizon`]), so a concurrent
+    /// long-running query or open transaction that pinned its snapshot is safe.
     pub fn compact_all(&self) -> usize {
-        let horizon = self.db.snapshot().csn;
+        let horizon = self.db.gc_horizon();
         self.db.compact_all(horizon)
     }
 }
