@@ -45,7 +45,13 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// snapshot.
 pub fn execute_query(be: &dyn SqlBackend, sql: &str) -> Result<Outcome, Error> {
     let snap = be.snapshot();
-    let ctx = SessionContext::new();
+    // Preserve identifier case: ChakraDB columns can be CamelCase (e.g. the
+    // ClickBench schema), and DataFusion otherwise lowercases unquoted names,
+    // which would fail to resolve `AdvEngineID`. DuckDB matches case-insensitively;
+    // disabling normalization keeps the two consistent for exact-case queries.
+    let mut config = datafusion::prelude::SessionConfig::new();
+    config.options_mut().sql_parser.enable_ident_normalization = false;
+    let ctx = SessionContext::new_with_config(config);
     for name in be.table_names() {
         if let Ok(t) = be.table(&name) {
             let mem = snapshot_memtable(t.as_ref(), snap);

@@ -72,3 +72,10 @@ name = "df-bench"
 path = "src/bin/df_bench.rs"
 required-features = ["datafusion"]
 
+# ClickBench-shaped validation: a 105-column analytical table + the standard
+# query subset, ChakraDB+DataFusion vs DuckDB on identical synthetic data.
+[[bin]]
+name = "clickbench"
+path = "src/bin/clickbench.rs"
+required-features = ["datafusion"]
+
