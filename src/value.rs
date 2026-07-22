@@ -23,6 +23,12 @@ pub enum DataType {
     Float,
     Text,
     Bool,
+    /// A calendar date, physically an `Int` of days since 1970-01-01 (Arrow
+    /// `Date32`). A *logical* type over `Value::Int` — no new `Value` variant.
+    Date,
+    /// A timestamp, physically an `Int` of microseconds since the Unix epoch
+    /// (Arrow `Timestamp(Microsecond)`). Logical type over `Value::Int`.
+    Timestamp,
 }
 
 impl DataType {
@@ -32,25 +38,32 @@ impl DataType {
             DataType::Float => "DOUBLE",
             DataType::Text => "TEXT",
             DataType::Bool => "BOOLEAN",
+            DataType::Date => "DATE",
+            DataType::Timestamp => "TIMESTAMP",
         }
     }
 
-    /// The sqllogictest column-type character.
+    /// The sqllogictest column-type character. Dates and timestamps render as
+    /// strings, so they report as text.
     pub fn type_char(self) -> char {
         match self {
             DataType::Int | DataType::Bool => 'I',
             DataType::Float => 'R',
-            DataType::Text => 'T',
+            DataType::Text | DataType::Date | DataType::Timestamp => 'T',
         }
     }
 
     /// Parse a SQL type name (case-insensitive), accepting common aliases.
     pub fn parse(name: &str) -> Option<DataType> {
-        match name.to_ascii_lowercase().as_str() {
+        // A parameterised type like `DECIMAL(10,2)` arrives as its head word.
+        let head = name.split(['(', ' ']).next().unwrap_or(name);
+        match head.to_ascii_lowercase().as_str() {
             "int" | "integer" | "bigint" | "smallint" | "tinyint" => Some(DataType::Int),
             "float" | "double" | "real" | "decimal" | "numeric" => Some(DataType::Float),
             "text" | "varchar" | "char" | "string" => Some(DataType::Text),
             "bool" | "boolean" => Some(DataType::Bool),
+            "date" => Some(DataType::Date),
+            "timestamp" | "datetime" => Some(DataType::Timestamp),
             _ => None,
         }
     }
@@ -111,6 +124,8 @@ impl Value {
             (Value::Int(_), DataType::Float) => true, // widening
             (Value::Text(_), DataType::Text) => true,
             (Value::Bool(_), DataType::Bool) => true,
+            // Date/Timestamp are physically Int (epoch days / micros).
+            (Value::Int(_), DataType::Date | DataType::Timestamp) => true,
             _ => false,
         }
     }
@@ -120,8 +135,24 @@ impl Value {
         match (&self, ty) {
             (Value::Null, _) => Some(Value::Null),
             (Value::Int(i), DataType::Float) => Some(Value::Float(*i as f64)),
+            // A `DATE '2024-01-15'` / `TIMESTAMP '...'` literal arrives as text and
+            // is stored as its epoch integer.
+            (Value::Text(s), DataType::Date) => parse_date(s).map(Value::Int),
+            (Value::Text(s), DataType::Timestamp) => parse_timestamp(s).map(Value::Int),
             (v, t) if v.fits(t) => Some(self),
             _ => None,
+        }
+    }
+
+    /// Render this value as it should appear for a column of type `ty`. For a
+    /// `DATE`/`TIMESTAMP` column (physically an `Int`) this formats the epoch
+    /// integer back to `YYYY-MM-DD[ HH:MM:SS]`; otherwise it is plain
+    /// [`Value::render`].
+    pub fn render_as(&self, ty: DataType) -> String {
+        match (self, ty) {
+            (Value::Int(d), DataType::Date) => render_date(*d),
+            (Value::Int(t), DataType::Timestamp) => render_timestamp(*t),
+            _ => self.render(),
         }
     }
 
@@ -193,6 +224,117 @@ impl Value {
             Value::Text(s) => s.capacity(),
             _ => 0,
         }
+    }
+}
+
+// --- Temporal encoding: DATE (days) / TIMESTAMP (micros) since 1970-01-01 ---
+//
+// DATE and TIMESTAMP are logical types stored as `Value::Int`. Conversions use
+// Howard Hinnant's proleptic-Gregorian civil<->days algorithm — exact, branchy,
+// and dependency-free (the core crate is `forbid(unsafe_code)` and has no chrono).
+
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// Days since 1970-01-01 for a proleptic-Gregorian `(year, month, day)`.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Inverse of [`days_from_civil`]: `(year, month, day)` for a day number.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Parse `YYYY-MM-DD` into days since the epoch.
+fn parse_date(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (y, m, d) = parse_ymd(s)?;
+    Some(days_from_civil(y, m, d))
+}
+
+fn parse_ymd(s: &str) -> Option<(i64, i64, i64)> {
+    let mut it = s.splitn(3, '-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some((y, m, d))
+}
+
+/// Parse `YYYY-MM-DD[ T]HH:MM:SS[.ffffff]` (time optional) into micros since epoch.
+fn parse_timestamp(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date_part, time_part) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+    let days = parse_date(date_part)?;
+    let micros_of_day = match time_part {
+        None => 0,
+        Some(t) => parse_time_micros(t)?,
+    };
+    Some(days * MICROS_PER_DAY + micros_of_day)
+}
+
+/// Parse `HH:MM:SS[.ffffff]` into microseconds within a day.
+fn parse_time_micros(t: &str) -> Option<i64> {
+    let mut it = t.splitn(3, ':');
+    let h: i64 = it.next()?.parse().ok()?;
+    let mi: i64 = it.next()?.parse().ok()?;
+    let (sec, frac) = match it.next() {
+        Some(rest) => match rest.split_once('.') {
+            Some((s, f)) => {
+                // Right-pad/truncate the fraction to 6 digits (microseconds).
+                let mut digits = f.chars().take(6).collect::<String>();
+                while digits.len() < 6 {
+                    digits.push('0');
+                }
+                (s.parse::<i64>().ok()?, digits.parse::<i64>().ok()?)
+            }
+            None => (rest.parse::<i64>().ok()?, 0),
+        },
+        None => (0, 0),
+    };
+    if !(0..=23).contains(&h) || !(0..=59).contains(&mi) || !(0..=60).contains(&sec) {
+        return None;
+    }
+    Some(((h * 60 + mi) * 60 + sec) * 1_000_000 + frac)
+}
+
+/// Format days-since-epoch as `YYYY-MM-DD`.
+fn render_date(days: i64) -> String {
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Format micros-since-epoch as `YYYY-MM-DD HH:MM:SS[.ffffff]`.
+fn render_timestamp(micros: i64) -> String {
+    let days = micros.div_euclid(MICROS_PER_DAY);
+    let rem = micros.rem_euclid(MICROS_PER_DAY);
+    let (y, m, d) = civil_from_days(days);
+    let secs = rem / 1_000_000;
+    let frac = rem % 1_000_000;
+    let (hh, mm, ss) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if frac == 0 {
+        format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}")
+    } else {
+        format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}.{frac:06}")
     }
 }
 
@@ -320,5 +462,58 @@ mod tests {
     fn heap_accounting() {
         assert_eq!(Value::Int(1).heap_bytes(), 0);
         assert!(Value::Text("hello".into()).heap_bytes() >= 5);
+    }
+
+    // --- Temporal encoding ------------------------------------------------
+
+    #[test]
+    fn date_epoch_and_known_dates() {
+        assert_eq!(parse_date("1970-01-01"), Some(0));
+        assert_eq!(parse_date("1970-01-02"), Some(1));
+        assert_eq!(parse_date("1969-12-31"), Some(-1));
+        // 2000-01-01 is 10957 days after the epoch.
+        assert_eq!(parse_date("2000-01-01"), Some(10957));
+    }
+
+    #[test]
+    fn date_round_trips_render() {
+        for s in ["1970-01-01", "1999-12-31", "2024-02-29", "2100-03-01", "1900-01-01"] {
+            let days = parse_date(s).unwrap();
+            assert_eq!(render_date(days), s, "round trip {s}");
+        }
+    }
+
+    #[test]
+    fn timestamp_parse_and_render() {
+        let micros = parse_timestamp("2024-01-15 13:45:06").unwrap();
+        assert_eq!(render_timestamp(micros), "2024-01-15 13:45:06");
+        // Date-only timestamp is midnight; 'T' separator is accepted.
+        assert_eq!(
+            parse_timestamp("2024-01-15"),
+            parse_timestamp("2024-01-15 00:00:00")
+        );
+        assert_eq!(
+            parse_timestamp("2024-01-15T13:45:06"),
+            parse_timestamp("2024-01-15 13:45:06")
+        );
+    }
+
+    #[test]
+    fn timestamp_fraction_round_trips() {
+        let m = parse_timestamp("2024-01-15 00:00:00.123456").unwrap();
+        assert_eq!(render_timestamp(m), "2024-01-15 00:00:00.123456");
+    }
+
+    #[test]
+    fn temporal_coercion_and_rendering() {
+        // Text literal coerces to the epoch integer; render_as formats it back.
+        let d = Value::Text("2024-01-15".into()).coerce(DataType::Date).unwrap();
+        assert!(matches!(d, Value::Int(_)));
+        assert_eq!(d.render_as(DataType::Date), "2024-01-15");
+        // render_as is a no-op for non-temporal types.
+        assert_eq!(Value::Int(19737).render_as(DataType::Int), "19737");
+        assert_eq!(Value::Text("x".into()).render_as(DataType::Text), "x");
+        // A bad date literal does not coerce.
+        assert_eq!(Value::Text("nope".into()).coerce(DataType::Date), None);
     }
 }

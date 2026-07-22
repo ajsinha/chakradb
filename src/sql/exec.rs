@@ -14,7 +14,8 @@ use super::plan::{AggFn, OrderKey, Plan, Projection};
 use super::value::{batch_value, Value};
 use crate::batch::Batch;
 use crate::error::Error;
-use crate::schema::Row;
+use crate::schema::{Row, Schema};
+use crate::value::DataType;
 use crate::table::Segment;
 use std::collections::BTreeMap;
 
@@ -136,6 +137,10 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
 
     let t = be.table(&table)?;
     let snap = be.snapshot();
+    // Output type per projection, so DATE/TIMESTAMP columns render as date
+    // strings rather than their epoch integers. `render_as` is a no-op for every
+    // other type, so a neutral default is safe for computed expressions.
+    let out_types = projection_types(&projections, t.schema());
 
     // Fast path: `SELECT COUNT(*) FROM t` with no filter answers from metadata,
     // the way DuckDB does — no scan at all. This is the single most common
@@ -175,7 +180,7 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
                 _ => Value::Null, // empty / all-NULL column
             };
             types.push(v.type_char());
-            rendered.push(v.render());
+            rendered.push(v.render_as(out_types[rendered.len()]));
         }
         return Ok(Outcome::Rows {
             columns,
@@ -210,7 +215,7 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
                     if types[i] == '?' {
                         types[i] = v.type_char();
                     }
-                    rendered.push(v.render());
+                    rendered.push(v.render_as(out_types[i]));
                 }
             }
             rows.push(rendered);
@@ -250,6 +255,7 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     if non_grouped && !order_by.is_empty() && !distinct {
         return Ok(project_ordered(
             &projections,
+            &out_types,
             &segments,
             &filter,
             &order_by,
@@ -261,13 +267,19 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
     // projected values — the same shape as GROUP BY. Dedup on typed keys during
     // the scan (holding only the distinct set, never 500k rendered strings).
     if non_grouped && distinct && order_by.is_empty() {
-        return Ok(project_distinct(&projections, &segments, &filter, limit));
+        return Ok(project_distinct(
+            &projections,
+            &out_types,
+            &segments,
+            &filter,
+            limit,
+        ));
     }
 
     let (columns, types, mut rows) = if non_grouped {
-        project_rows(&projections, &segments, &filter)
+        project_rows(&projections, &out_types, &segments, &filter)
     } else {
-        aggregate_rows(&projections, &group_by, &segments, &filter)?
+        aggregate_rows(&projections, &out_types, &group_by, &segments, &filter)?
     };
 
     if distinct {
@@ -292,6 +304,7 @@ fn exec_select(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
 /// renders each survivor once — instead of rendering every input row.
 fn project_distinct(
     projections: &[Projection],
+    out_types: &[DataType],
     segments: &[Segment],
     filter: &Option<Expr>,
     limit: Option<usize>,
@@ -341,7 +354,7 @@ fn project_distinct(
                 if types[col] == '?' {
                     types[col] = v.0.type_char();
                 }
-                rendered.push(v.0.render());
+                rendered.push(v.0.render_as(out_types[col]));
             }
         }
         rows.push(rendered);
@@ -362,6 +375,7 @@ fn project_distinct(
 /// then renders the survivors in order.
 fn project_ordered(
     projections: &[Projection],
+    out_types: &[DataType],
     segments: &[Segment],
     filter: &Option<Expr>,
     order_by: &[OrderKey],
@@ -432,7 +446,7 @@ fn project_ordered(
                 if types[col] == '?' {
                     types[col] = v.type_char();
                 }
-                rendered.push(v.render());
+                rendered.push(v.render_as(out_types[col]));
             }
         }
         rows.push(rendered);
@@ -592,6 +606,21 @@ pub(crate) fn prune_favors_interpreter(plan: &Plan, table: &crate::table::Table)
     total > 0 && surviving.saturating_mul(5) <= total
 }
 
+/// The rendered output type of each projection. A bare column (or `MIN`/`MAX`
+/// of one) carries that column's declared type — so a `DATE`/`TIMESTAMP` renders
+/// as a date string; a computed expression defaults to `Int`, for which
+/// [`Value::render_as`] is identical to [`Value::render`].
+fn projection_types(projs: &[Projection], schema: &Schema) -> Vec<DataType> {
+    projs
+        .iter()
+        .map(|p| match p {
+            Projection::Expr(Expr::Column(i), _) => schema.column(*i).ty,
+            Projection::Agg(AggFn::Min | AggFn::Max, Some(i), _) => schema.column(*i).ty,
+            _ => DataType::Int,
+        })
+        .collect()
+}
+
 /// Whether batch row `i` passes an optional predicate, evaluated columnar.
 #[inline]
 fn passes_at(filter: &Option<Expr>, batch: &Batch, i: usize) -> bool {
@@ -603,6 +632,7 @@ fn passes_at(filter: &Option<Expr>, batch: &Batch, i: usize) -> bool {
 
 fn project_rows(
     projections: &[Projection],
+    out_types: &[DataType],
     segments: &[Segment],
     filter: &Option<Expr>,
 ) -> ResultSet {
@@ -628,7 +658,7 @@ fn project_rows(
                     if types[i] == '?' {
                         types[i] = v.type_char();
                     }
-                    rendered.push(v.render());
+                    rendered.push(v.render_as(out_types[i]));
                 }
             }
             out.push(rendered);
@@ -794,6 +824,7 @@ impl Acc {
 
 fn aggregate_rows(
     projections: &[Projection],
+    out_types: &[DataType],
     group_by: &[usize],
     segments: &[Segment],
     filter: &Option<Expr>,
@@ -862,14 +893,14 @@ fn aggregate_rows(
                     if types[i] == '?' {
                         types[i] = val.map(|v| v.type_char()).unwrap_or('?');
                     }
-                    rendered.push(val.map(|v| v.render()).unwrap_or_default());
+                    rendered.push(val.map(|v| v.render_as(out_types[i])).unwrap_or_default());
                     continue;
                 }
             };
             if types[i] == '?' {
                 types[i] = v.type_char();
             }
-            rendered.push(v.render());
+            rendered.push(v.render_as(out_types[i]));
         }
         out.push(rendered);
     }

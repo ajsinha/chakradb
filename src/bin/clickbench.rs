@@ -143,7 +143,9 @@ fn parse_field(s: &str, ty: DataType) -> Value {
         return Value::Null; // empty field -> NULL, matching DuckDB read_csv
     }
     match ty {
-        DataType::Int => s.parse::<i64>().map(Value::Int).unwrap_or(Value::Null),
+        DataType::Int | DataType::Date | DataType::Timestamp => {
+            s.parse::<i64>().map(Value::Int).unwrap_or(Value::Null)
+        }
         DataType::Float => s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null),
         DataType::Text => Value::Text(s.to_string()),
         DataType::Bool => Value::Bool(s == "1" || s.eq_ignore_ascii_case("true")),

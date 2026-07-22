@@ -74,11 +74,16 @@ pub struct Schema {
 }
 
 fn arrow_type(ty: DataType) -> ArrowType {
+    use arrow::datatypes::TimeUnit;
     match ty {
         DataType::Int => ArrowType::Int64,
         DataType::Float => ArrowType::Float64,
         DataType::Text => ArrowType::Utf8,
         DataType::Bool => ArrowType::Boolean,
+        // DATE/TIMESTAMP are physically integers but exposed to Arrow (and thus
+        // DataFusion) as their native temporal types, so date functions work.
+        DataType::Date => ArrowType::Date32,
+        DataType::Timestamp => ArrowType::Timestamp(TimeUnit::Microsecond, None),
     }
 }
 

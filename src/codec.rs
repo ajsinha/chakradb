@@ -151,6 +151,8 @@ fn datatype_tag(ty: crate::value::DataType) -> u8 {
         Float => 2,
         Text => 3,
         Bool => 4,
+        Date => 5,
+        Timestamp => 6,
     }
 }
 
@@ -161,6 +163,8 @@ fn tag_datatype(tag: u8) -> Option<crate::value::DataType> {
         2 => Some(Float),
         3 => Some(Text),
         4 => Some(Bool),
+        5 => Some(Date),
+        6 => Some(Timestamp),
         _ => None,
     }
 }

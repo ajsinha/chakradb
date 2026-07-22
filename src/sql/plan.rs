@@ -552,6 +552,7 @@ pub fn plan_expr(e: &sa::Expr, schema: &Schema) -> Result<Expr, String> {
             resolve(&parts.last().map(|p| p.value.clone()).unwrap_or_default())
         }
         sa::Expr::Value(v) => Ok(Expr::Literal(literal_value_inner(&v.value)?)),
+        sa::Expr::TypedString(ts) => Ok(Expr::Literal(typed_string_value(ts)?)),
         sa::Expr::Nested(inner) => plan_expr(inner, schema),
         sa::Expr::IsNull(inner) => Ok(Expr::IsNull(Box::new(plan_expr(inner, schema)?), false)),
         sa::Expr::IsNotNull(inner) => Ok(Expr::IsNull(Box::new(plan_expr(inner, schema)?), true)),
@@ -565,13 +566,47 @@ pub fn plan_expr(e: &sa::Expr, schema: &Schema) -> Result<Expr, String> {
         }
         sa::Expr::BinaryOp { left, op, right } => {
             let b = binary_op(op)?;
-            Ok(Expr::Binary(
-                b,
-                Box::new(plan_expr(left, schema)?),
-                Box::new(plan_expr(right, schema)?),
-            ))
+            let (l, r) = (plan_expr(left, schema)?, plan_expr(right, schema)?);
+            // Coerce a literal compared against a typed column to that column's
+            // type — so `date_col >= '2024-01-15'` compares the stored epoch
+            // integer to an epoch integer (not to a string, which would misorder),
+            // and a point lookup on a DATE/TIMESTAMP key resolves.
+            let (l, r) = coerce_comparison(schema, b, l, r);
+            Ok(Expr::Binary(b, Box::new(l), Box::new(r)))
         }
         other => Err(format!("unsupported expression: {other:?}")),
+    }
+}
+
+/// Parse a `DATE '…'` / `TIMESTAMP '…'` typed string literal into its stored
+/// [`Value`].
+fn typed_string_value(ts: &sa::TypedString) -> Result<Value, String> {
+    let ty = DataType::parse(&ts.data_type.to_string())
+        .ok_or_else(|| format!("unsupported typed literal: {}", ts.data_type))?;
+    let inner = literal_value_inner(&ts.value.value)?;
+    inner
+        .coerce(ty)
+        .ok_or_else(|| format!("invalid {} literal", ty.name()))
+}
+
+/// For a comparison with one bare-column and one literal operand, coerce the
+/// literal to the column's declared type. Leaves the expression untouched if the
+/// operands aren't column-vs-literal or the literal can't be coerced.
+fn coerce_comparison(schema: &Schema, op: BinaryOp, l: Expr, r: Expr) -> (Expr, Expr) {
+    use BinaryOp::*;
+    if !matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq) {
+        return (l, r);
+    }
+    match (&l, &r) {
+        (Expr::Column(i), Expr::Literal(v)) => match v.clone().coerce(schema.column(*i).ty) {
+            Some(cv) => (l, Expr::Literal(cv)),
+            None => (l, r),
+        },
+        (Expr::Literal(v), Expr::Column(i)) => match v.clone().coerce(schema.column(*i).ty) {
+            Some(cv) => (Expr::Literal(cv), r),
+            None => (l, r),
+        },
+        _ => (l, r),
     }
 }
 
@@ -598,6 +633,7 @@ fn binary_op(op: &sa::BinaryOperator) -> Result<BinaryOp, String> {
 fn literal_value(e: &sa::Expr) -> Result<Value, String> {
     match e {
         sa::Expr::Value(v) => literal_value_inner(&v.value),
+        sa::Expr::TypedString(ts) => typed_string_value(ts),
         sa::Expr::UnaryOp {
             op: sa::UnaryOperator::Minus,
             expr,

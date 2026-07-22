@@ -9,8 +9,9 @@
 use crate::schema::{Row, Schema};
 use crate::value::{DataType, Value};
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array,
-    Int64Builder, StringArray, StringBuilder, UInt32Array,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Float64Array,
+    Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
+    TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt32Array,
 };
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
@@ -157,6 +158,16 @@ impl Batch {
                 let a = arr.as_any().downcast_ref::<BooleanArray>()?;
                 Some((Value::Bool(min_boolean(a)?), Value::Bool(max_boolean(a)?)))
             }
+            // Temporal zonemaps: min/max over the native array, as Int values —
+            // so range pruning works on DATE/TIMESTAMP columns too.
+            DataType::Date => {
+                let a = arr.as_any().downcast_ref::<Date32Array>()?;
+                Some((Value::Int(min(a)? as i64), Value::Int(max(a)? as i64)))
+            }
+            DataType::Timestamp => {
+                let a = arr.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
+                Some((Value::Int(min(a)?), Value::Int(max(a)?)))
+            }
         }
     }
 
@@ -277,6 +288,29 @@ fn build_column(ty: DataType, rows: &[Row], ci: usize) -> ArrayRef {
             }
             Arc::new(b.finish())
         }
+        // DATE/TIMESTAMP: physically Int, written to the native Arrow array.
+        DataType::Date => {
+            let mut b = Date32Builder::with_capacity(rows.len());
+            for r in rows {
+                match &r.values[ci] {
+                    Value::Int(v) => b.append_value(*v as i32),
+                    Value::Null => b.append_null(),
+                    other => b.append_value(other.as_int().unwrap_or(0) as i32),
+                }
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Timestamp => {
+            let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
+            for r in rows {
+                match &r.values[ci] {
+                    Value::Int(v) => b.append_value(*v),
+                    Value::Null => b.append_null(),
+                    other => b.append_value(other.as_int().unwrap_or(0)),
+                }
+            }
+            Arc::new(b.finish())
+        }
     }
 }
 
@@ -310,6 +344,18 @@ fn array_value(arr: &ArrayRef, ty: DataType, i: usize) -> Value {
             arr.as_any()
                 .downcast_ref::<BooleanArray>()
                 .expect("bool column")
+                .value(i),
+        ),
+        DataType::Date => Value::Int(
+            arr.as_any()
+                .downcast_ref::<Date32Array>()
+                .expect("date column")
+                .value(i) as i64,
+        ),
+        DataType::Timestamp => Value::Int(
+            arr.as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("timestamp column")
                 .value(i),
         ),
     }
