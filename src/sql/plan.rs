@@ -173,6 +173,7 @@ fn schema_from_ddl(ct: &sa::CreateTable) -> Result<Schema, String> {
         let ty = DataType::parse(&col.data_type.to_string())
             .ok_or_else(|| format!("unsupported column type for {name}: {}", col.data_type))?;
         let mut def = ColumnDef::new(name.clone(), ty);
+        def.max_len = text_max_len(&col.data_type);
         for o in &col.options {
             match &o.option {
                 sa::ColumnOption::PrimaryKey(_) => {
@@ -257,6 +258,7 @@ pub(crate) fn enforce_constraints(
     row: &Row,
 ) -> Result<(), crate::error::Error> {
     schema.check_not_null(row)?;
+    schema.check_lengths(row)?;
     for (text, expr) in checks {
         if expr.eval(row).is_false() {
             return Err(crate::error::Error::ConstraintViolation(format!(
@@ -265,6 +267,24 @@ pub(crate) fn enforce_constraints(
         }
     }
     Ok(())
+}
+
+/// The declared character length of a `CHAR(n)`/`VARCHAR(n)` type, if any.
+fn text_max_len(dt: &sa::DataType) -> Option<u32> {
+    use sa::DataType as D;
+    let len = match dt {
+        D::Char(l)
+        | D::Character(l)
+        | D::Varchar(l)
+        | D::Nvarchar(l)
+        | D::CharVarying(l)
+        | D::CharacterVarying(l) => l.as_ref(),
+        _ => return None,
+    };
+    match len? {
+        sa::CharacterLength::IntegerLength { length, .. } => u32::try_from(*length).ok(),
+        sa::CharacterLength::Max => None,
+    }
 }
 
 fn object_name(n: &sa::ObjectName) -> String {

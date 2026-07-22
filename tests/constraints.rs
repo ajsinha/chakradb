@@ -144,6 +144,52 @@ fn constraints_survive_a_reopen() {
 }
 
 #[test]
+fn varchar_length_is_enforced() {
+    let e = eng();
+    e.run("CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(4))")
+        .unwrap();
+    e.run("INSERT INTO t VALUES (1, 'ABCD')").unwrap(); // exactly n is ok
+    assert!(e.run("INSERT INTO t VALUES (2, 'ABCDE')").is_err()); // over by one
+    assert_eq!(one(&e, "SELECT code FROM t WHERE id = 1"), "ABCD");
+    // Length is measured in characters, not bytes.
+    assert!(
+        e.run("INSERT INTO t VALUES (3, 'héllo')").is_err(),
+        "5 chars exceeds VARCHAR(4)"
+    );
+    e.run("INSERT INTO t VALUES (4, 'héll')").unwrap(); // 4 chars, multi-byte
+    assert_eq!(one(&e, "SELECT code FROM t WHERE id = 4"), "héll");
+}
+
+#[test]
+fn varchar_length_enforced_on_update() {
+    let e = eng();
+    e.run("CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(3))")
+        .unwrap();
+    e.run("INSERT INTO t VALUES (1, 'ok')").unwrap();
+    assert!(e.run("UPDATE t SET code = 'toolong' WHERE id = 1").is_err());
+    assert_eq!(one(&e, "SELECT code FROM t WHERE id = 1"), "ok");
+}
+
+#[test]
+fn varchar_length_survives_reopen() {
+    let io: Arc<dyn Io> = Arc::new(MemIo::new());
+    {
+        let e = SqlEngine::durable(Arc::new(
+            Storage::open(io.clone(), StorageConfig::default()).unwrap(),
+        ));
+        e.run("CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(2))")
+            .unwrap();
+        e.run("INSERT INTO t VALUES (1, 'hi')").unwrap();
+    }
+    let e2 = SqlEngine::durable(Arc::new(
+        Storage::open(io, StorageConfig::default()).unwrap(),
+    ));
+    assert!(e2.run("INSERT INTO t VALUES (2, 'toolong')").is_err());
+    e2.run("INSERT INTO t VALUES (3, 'ok')").unwrap();
+    assert_eq!(one(&e2, "SELECT COUNT(*) FROM t"), "2");
+}
+
+#[test]
 fn update_is_statement_atomic_on_violation() {
     let e = eng();
     e.run("CREATE TABLE t (id INT PRIMARY KEY, age INT CHECK (age >= 0))")

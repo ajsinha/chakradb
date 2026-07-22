@@ -33,6 +33,9 @@ pub struct ColumnDef {
     pub nullable: bool,
     /// A literal `DEFAULT` applied to this column when an `INSERT` omits it.
     pub default: Option<Value>,
+    /// Maximum length in characters for a `VARCHAR(n)`/`CHAR(n)` column. `None`
+    /// means unbounded text. Enforced at write time.
+    pub max_len: Option<u32>,
 }
 
 impl ColumnDef {
@@ -43,6 +46,7 @@ impl ColumnDef {
             ty,
             nullable: true,
             default: None,
+            max_len: None,
         }
     }
 
@@ -55,6 +59,12 @@ impl ColumnDef {
     /// Give this column a literal `DEFAULT` (builder style).
     pub fn with_default(mut self, v: Value) -> Self {
         self.default = Some(v);
+        self
+    }
+
+    /// Bound this text column to `n` characters (builder style).
+    pub fn with_max_len(mut self, n: u32) -> Self {
+        self.max_len = Some(n);
         self
     }
 }
@@ -235,6 +245,24 @@ impl Schema {
                     "NULL in NOT NULL column {}",
                     c.name
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a row whose text exceeds a column's `VARCHAR(n)`/`CHAR(n)` length,
+    /// measured in characters (Unicode scalar values), per SQL.
+    pub fn check_lengths(&self, row: &Row) -> Result<()> {
+        for (i, c) in self.columns.iter().enumerate() {
+            if let (Some(max), Some(Value::Text(s))) = (c.max_len, row.values.get(i)) {
+                let len = s.chars().count();
+                if len > max as usize {
+                    return Err(Error::ConstraintViolation(format!(
+                        "value for {} is {len} chars, exceeds {}({max})",
+                        c.name,
+                        c.ty.name()
+                    )));
+                }
             }
         }
         Ok(())

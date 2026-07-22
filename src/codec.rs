@@ -130,6 +130,8 @@ impl Encoder {
                     self.u8(0);
                 }
             }
+            // max_len: 0 sentinel = unbounded (a real VARCHAR(0) is meaningless).
+            self.u32(c.max_len.unwrap_or(0));
         }
         self.u32(s.key_index() as u32).u8(s.synthetic_key() as u8);
         self.u32(s.checks().len() as u32);
@@ -140,9 +142,9 @@ impl Encoder {
     }
 }
 
-/// Schema encoding version. v2 adds per-column nullable + default and
-/// table-level CHECK clauses over the original v1 layout.
-const SCHEMA_VERSION: u8 = 2;
+/// Schema encoding version. v2 added per-column nullable + default and
+/// table-level CHECK clauses; v3 adds a per-column `VARCHAR(n)` max length.
+const SCHEMA_VERSION: u8 = 3;
 
 fn datatype_tag(ty: crate::value::DataType) -> u8 {
     use crate::value::DataType::*;
@@ -287,9 +289,14 @@ impl<'a> Decoder<'a> {
             } else {
                 None
             };
+            let max_len = match self.u32()? {
+                0 => None,
+                n => Some(n),
+            };
             let mut col = ColumnDef::new(name, ty);
             col.nullable = nullable;
             col.default = default;
+            col.max_len = max_len;
             columns.push(col);
         }
         let key_index = self.u32()? as usize;
@@ -494,7 +501,9 @@ mod tests {
         let schema = Schema::new(
             vec![
                 ColumnDef::new("id", DataType::Int).not_null(),
-                ColumnDef::new("status", DataType::Text).with_default(Value::Text("new".into())),
+                ColumnDef::new("status", DataType::Text)
+                    .with_default(Value::Text("new".into()))
+                    .with_max_len(16),
                 ColumnDef::new("age", DataType::Int),
             ],
             0,
@@ -508,6 +517,7 @@ mod tests {
 
         assert!(!got.column(0).nullable, "NOT NULL survives");
         assert_eq!(got.column(1).default, Some(Value::Text("new".into())));
+        assert_eq!(got.column(1).max_len, Some(16), "VARCHAR length survives");
         assert!(got.column(2).nullable);
         assert_eq!(got.checks(), &["age >= 0".to_string()]);
         assert!(schema.same_shape(&got));
