@@ -1,5 +1,14 @@
 # M0 Findings — Risk Reduction Spike
 
+> **⚠️ Historical record.** A point-in-time report of the M0 throwaway prototype:
+> an in-memory, zero-dependency engine over a **fixed four-column schema** with a
+> struct-of-vectors columnar layout. Since then the storage went **Arrow-native**
+> with **arbitrary schemas** (`arrow-schema-migration.md`), so the "zero external
+> dependencies" and "struct-of-vectors" claims below describe M0 only, not the
+> current engine. The result that mattered — the sorted-key index at ~1.25 B/row
+> and non-blocking scans under write — carried forward and still holds. Preserved
+> as written; read for the reasoning, not the current state.
+
 **Milestone:** M0 (see `roadmap.md`)
 **Status:** Complete
 **Verdict:** **PROCEED to M1**, with two design changes required before M1 starts.

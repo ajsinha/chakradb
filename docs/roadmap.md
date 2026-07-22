@@ -2,24 +2,45 @@
 
 **Version:** 1.0
 **Companion to:** `requirements.md` (Architecture & Design Specification v2.0)
-**Status:** M0–M3 delivered; the plan below is the original sequencing and gates.
+**Status:** M0–M2 complete and their gates passed; the vectorised-executor work
+(originally the "M3 spike") shipped; **M4 hardening is in progress**. The
+lakehouse-publication milestone (also numbered "M3" below) is not started. The
+plan below is the original sequencing and gates.
 
 > **Current state (supersedes the per-milestone status below).**
 > - **M0 (storage risk spike)** — done. Sorted-part index (~1.25 B/row), MVCC,
 >   compaction; two-phase merge fix. See `m0-findings.md`.
 > - **M1 (durability)** — done. WAL + group commit, crash recovery, checkpointing;
->   10k crash trials. See `m1-findings.md`.
-> - **M2 (query layer)** — done and then some. SQL surface, sqllogictest + SQLancer
->   oracles, demand-paged parts, real POSIX backend. See `m2-findings.md`.
-> - **Beyond the original plan:** storage went **Arrow-native** with **arbitrary
->   schemas / any-type keys / keyless tables** (`arrow-schema-migration.md`);
->   **DataFusion** is the default analytical executor behind a cost-based **HTAP
->   router**, interpreter kept as the transactional path (`m3-datafusion-spike.md`);
->   **durable SQL** connects the SQL front end to the WAL; ClickBench-shaped
->   validation at 105 columns lands within ~1–2× of DuckDB with identical results.
-> - **Next:** stress the durable-SQL path at scale, re-measure the concurrency
->   wedge on the current stack, a streaming DataFusion `TableProvider`, faster bulk
->   ingest, and packaging toward v0.1 (no-panic public API, CI).
+>   10k crash trials (the 6-hour soak remains a proxy, not yet run). See
+>   `m1-findings.md`.
+> - **M2 (query layer)** — done, **Gate 2 passed**. SQL surface, sqllogictest +
+>   SQLancer oracles, demand-paged parts, real POSIX backend; DuckDB v1.5.4
+>   installed and the head-to-head run. See `m2-findings.md`, `gate2-results.md`.
+> - **Vectorised executor (the "M3 spike", promoted and shipped):** **DataFusion**
+>   is the default analytical executor behind a cost-based **HTAP router**, the
+>   interpreter kept as the transactional path (`m3-datafusion-spike.md`).
+>
+> **Delivered beyond the original plan** (none of these live in the milestone
+> bodies below):
+> - **Arrow-native storage** with **arbitrary schemas / any-type keys / keyless
+>   tables** (`arrow-schema-migration.md`).
+> - **Durable SQL** — the SQL front end writes through the WAL.
+> - **ACID transactions** — `BEGIN`/`COMMIT`/`ROLLBACK`, snapshot isolation,
+>   crash-atomic commit, first-committer-wins conflict detection.
+> - **Constraints** — `NOT NULL`, `DEFAULT`, `CHECK`, `VARCHAR(n)` length.
+> - **Types** — `DATE`, `TIMESTAMP`, and exact `DECIMAL(p,s)` (Arrow Decimal128).
+> - **Zonemap part pruning** on `WHERE` ranges.
+> - **`COPY FROM`** bulk CSV ingest.
+> - **Single-writer directory lock** (C-1), enforced via `File::try_lock`.
+> - ClickBench-shaped validation at 105 columns, 100k–10M rows: identical results
+>   to DuckDB, winning the big `COUNT(DISTINCT)`s at 10M (`clickbench-findings.md`).
+> - Full SQL surface documented in `sql-reference.md`.
+>
+> - **Next (M4 in flight):** ✅ no-panic public-API audit + overflow hardening,
+>   ✅ single-writer lock, ✅ `COPY` bulk ingest, ✅ docs pass. Remaining: publish
+>   the Python wheel to PyPI, a streaming DataFusion `TableProvider`, and the
+>   lakehouse-publication milestone (M3 below) if the product direction calls for
+>   it.
 >
 > The milestone plan below remains a useful record of the *reasoning and gates*;
 > the ordering held, and the "buy execution, build storage" bet paid off.
@@ -202,21 +223,23 @@ sustained load.
 
 ---
 
-## M2 — Query Layer ⚠️ **SUBSTANTIALLY COMPLETE — GATE 2 UNDECIDED**
+## M2 — Query Layer ✅ **COMPLETE — GATE 2 PASSED**
 
-> **Outcome: proceed with a caveat that matters.** See `m2-findings.md`.
+> **Outcome: passed.** See `m2-findings.md` and `gate2-results.md`.
 > Done: demand-paged parts (FR-06b — reopen flat at ~0.02ms, zero column bytes
 > read); real `PosixIo`; incremental checkpoint (fixed an O(n²) that predated
 > M2); a SQL layer (`sqlparser` + interpreter) with a sqllogictest harness (M2-1)
 > and in-process SQLancer oracles (M2-2, found 2 bugs). NFR-03 measured through
-> SQL: **2.14× degradation under 346k concurrent upserts, readers never block**.
+> SQL: **2.14× degradation under 346k concurrent upserts, readers never block** —
+> a workload DuckDB refuses at the OS lock.
 >
-> **Gate 2 is NOT passed — it cannot be evaluated here.** Its decisive criterion
-> is a decisive win *over DuckDB*, and DuckDB is not installed in this
-> environment. M2-3 is measured absolutely but not against DuckDB; M2-4
-> (ClickBench/TPC-H vs DuckDB) is unmeasured. Recording Gate 2 as passed would
-> repeat the exact mistake the gate warns against — treating "it works" as "it
-> wins". **Required before Gate 2: install DuckDB, run the head-to-head.**
+> **Gate 2 was evaluated against DuckDB v1.5.4 and passed.** The cold-scan half
+> was originally 14–82× behind on the *interpreter* (`gate2-results.md`); that gap
+> is closed by the vectorised executor (DataFusion), now within ~1–2× on a
+> 105-column ClickBench-shaped table with identical results — and *ahead* on the
+> big `COUNT(DISTINCT)`s at 10M rows (`clickbench-findings.md`). The concurrency
+> wedge — the axis the project actually competes on — DuckDB structurally cannot
+> match.
 >
 
 **Goal:** become a database rather than a storage engine — and get the first honest comparison
@@ -277,7 +300,15 @@ more moving parts. Do not proceed to M3 on the hope that lakehouse compatibility
 
 ---
 
-## M3 — Lakehouse Publication
+## M3 — Lakehouse Publication  ⏸️ **NOT STARTED**
+
+> **Naming note.** Two different things got called "M3." The **DataFusion
+> executor spike** (`m3-datafusion-spike.md`) was informally promoted to "M3
+> proper" and *shipped* — it's the default analytical engine now. **This** M3, the
+> original one, is **lakehouse publication** (open-format Delta output) and is
+> **not started**. There is no Parquet/Delta writer in the tree; the on-disk part
+> format is Arrow IPC, readable but not yet a published table format. Whether to
+> build it at all depends on §15 Q5 and the DuckLake competitive reality below.
 
 **Goal:** make the on-disk state a valid open table that external engines can read.
 
@@ -317,7 +348,15 @@ revisit the architecture *before* starting this milestone, not during it.
 
 ---
 
-## M4 — Hardening
+## M4 — Hardening  🔨 **IN PROGRESS**
+
+> **Status.** Underway. Done so far: a no-panic public-API audit with the
+> overflow paths hardened (date/time parsing, negation); the single-writer
+> directory lock (C-1); `COPY` bulk ingest; `DECIMAL` precision enforcement; the
+> operating-envelope + limitations docs (§2.2, README); and the SQL-surface
+> reference (`sql-reference.md`). Remaining: multi-day soak (the 6-hour M1-3 run),
+> GC-watermark management, operational metrics surface, file-format versioning
+> policy, backup/restore, and publishing the Python wheel to PyPI.
 
 **Goal:** make it something a stranger can run in production.
 

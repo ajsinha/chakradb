@@ -1,9 +1,13 @@
 # ChakraDB — Architecture & Design Specification
 
-**Document Version:** 2.0
-**Status:** Design proposal, pre-implementation
+**Document Version:** 2.1
+**Status:** Partly implemented — M0–M2 delivered and their gates passed; the
+vectorised executor shipped; M4 hardening in progress. This spec is the *design*;
+`roadmap.md` tracks milestone status, `sql-reference.md` documents the delivered
+SQL surface, and §2.2 states the current operating envelope. Sections describing
+lakehouse publication (§6, the original §12 M3) remain forward-looking.
 **Supersedes:** v1.0, archived at `archive/requirements-v1.0.md`
-**Core language:** Rust
+**Core language:** Rust (MSRV 1.89; `#![forbid(unsafe_code)]` in the core)
 **v1 target platforms:** `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` (Windows deferred — see §12)
 
 ---
@@ -195,13 +199,13 @@ Writing these down is as important as the requirements. **Not** in v1:
   this engine is built around; foreign keys are a different feature with a
   different cost model, and adding them would put a second index structure on
   the write path.
-- Secondary indexes. Primary key only (also listed below).
+- Secondary indexes. Primary-key index only.
 - Full PostgreSQL dialect compatibility (see §9 — this was a serious misjudgment in v1.0).
 - Windows support (deferred to v2; it doubles the I/O and filesystem test matrix).
-- Python and Java bindings.
+- Java bindings. *(A Python DB-API 2.0 driver has since shipped — `bindings/python/`
+  — so this non-goal no longer applies to Python.)*
 - User-defined functions, extensions, stored procedures.
 - Larger-than-memory *working sets* beyond what the underlying engine provides.
-- Secondary indexes. Primary key index only.
 
 ---
 
@@ -429,12 +433,13 @@ clustering keys in v1 without revisiting this section.
 **M0 must measure:** lookup latency vs part count, bloom filter memory at 1M/10M/100M rows, and
 the point at which fan-out forces compaction. These are the numbers that decide viability.
 
-**Open question requiring a decision before implementation:** do we require a declared
-primary key on every table? Options: (a) require it — simplest, restricts use; (b) allow
-PK-less append-only tables that support INSERT and full-file DELETE but not point UPDATE —
-recommended, since it makes the common streaming-ingest case cheap; (c) synthesize a hidden
-row ID — costs an index on everything. **Recommendation: (b).** Tables opt into point
-mutability by declaring a PK, and pay the index cost only then.
+**~~Open question~~ RESOLVED:** do we require a declared primary key on every
+table? Shipped answer: **a hybrid of (b) and (c).** A table may declare a
+primary key of any type; a table with no declared key gets a hidden
+auto-increment `_rowid` (a keyless table). Crucially there is no *separate* index
+to pay for either way — the sorted key column *is* the index (§5.2 above), so the
+synthesised-rowid case does not "cost an index on everything." Keyless tables
+support `INSERT`; point `UPDATE`/`DELETE` address rows by the (real or hidden) key.
 
 ### 5.3 MVCC and visibility
 
@@ -815,9 +820,24 @@ Two consequences worth writing down:
 
 ---
 
-## 8. Query Execution — buy, don't build (for now)
+## 8. Query Execution — a dual-engine HTAP router
 
-**Recommendation: build on DataFusion for v1**, behind a deliberately narrow interface.
+> **What shipped (updates the original "buy, don't build" recommendation).** The
+> bet was to *buy* execution (DataFusion) and *build* storage. What actually
+> shipped is a **cost-based HTAP router** (`src/sql/mod.rs`) over **two** engines:
+> a hand-written **interpreter** for the transactional/point path, and DataFusion
+> for the analytical path. Buying DataFusion still holds for scans, joins,
+> aggregation, windows, and subqueries; but a compact interpreter was built
+> because it wins the shapes DataFusion is wrong for — metadata `COUNT(*)`/
+> `MIN`/`MAX` (answered from zonemaps, no scan), key point-lookups, writes (which
+> own the WAL and snapshot clock), and selective range scans (zonemap **part
+> pruning**). It is also the zero-heavy-dependency fallback and the only engine
+> that runs inside a transaction. The router sends each query to whichever fits;
+> see `src/sql/exec.rs::prefers_vectorized` and `sql-reference.md` for the split.
+> The DataFusion spilling analysis below is unchanged and still governs the
+> analytical half.
+
+**Original recommendation: build on DataFusion for v1**, behind a deliberately narrow interface.
 
 Rationale:
 
@@ -982,6 +1002,25 @@ engine, that must be a contained change. Design for the swap; do not perform it 
 ---
 
 ## 9. SQL Surface — a correction to v1.0
+
+> **Delivered surface (the "documented subset" this section called for now
+> exists).** The full, authoritative list is in **[`sql-reference.md`](sql-reference.md)**.
+> In brief, ChakraDB accepts:
+> - **Statements:** `CREATE TABLE`, `INSERT` (positional or column-list, with
+>   `DEFAULT`), `SELECT` (projections, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`,
+>   `DISTINCT`, `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`), `UPDATE`, `DELETE`,
+>   `COPY … FROM` (bulk CSV), and `BEGIN`/`COMMIT`/`ROLLBACK`.
+> - **Types:** `INT`, `FLOAT`/`DOUBLE`, `TEXT`/`VARCHAR(n)`/`CHAR(n)`, `BOOLEAN`,
+>   `DATE`, `TIMESTAMP`, exact `DECIMAL(p,s)` (Arrow Decimal128).
+> - **Constraints:** single-column `PRIMARY KEY`, `NOT NULL`, `DEFAULT`, `CHECK`
+>   (column + table), `VARCHAR(n)` length.
+> - **Two engines:** the interpreter handles single-table shapes and all writes;
+>   joins / subqueries / windows / `LIKE`/`IN`/`CASE`/scalar functions go to
+>   DataFusion (default build), and cannot run inside a transaction.
+>
+> Not supported: `ALTER`/`DROP TABLE`, `CREATE INDEX`, views, `MERGE`, CTEs,
+> composite/UNIQUE/FOREIGN keys. The parser-choice reasoning below is unchanged
+> and still governs.
 
 v1.0 required "complete PostgreSQL dialect compatibility" via `libpg_query`. This
 significantly misjudges where the difficulty lies.
@@ -1229,7 +1268,14 @@ choosing untestable durability.**
 Each milestone ends with a **decision point** where the project can be redirected or abandoned
 cheaply. Deliberately, the riskiest question is answered first.
 
-### M0 — Kill the biggest risk (target: weeks, not months)
+> **Status (see `roadmap.md` for detail).** M0 ✅, M1 ✅, M2 ✅ (Gate 2 passed vs
+> DuckDB v1.5.4). The vectorised-executor work — informally "the M3 spike" — ✅
+> shipped as the default analytical engine. **M3 lakehouse publication below is
+> NOT started** (no Parquet/Delta writer). **M4 hardening is 🔨 in progress.** M5's
+> Python binding ✅ shipped (DB-API 2.0). Two features arrived *beyond* this plan:
+> ACID transactions and the full constraint/type SQL surface (see §9, §2.2).
+
+### M0 — Kill the biggest risk (target: weeks, not months) — ✅ done
 Build a throwaway prototype that answers only: *can we sustain high-rate keyed updates while
 scanning, with an acceptable PK index memory footprint?*
 - In-memory only. No SQL. No persistence. No table format.
@@ -1239,33 +1285,44 @@ scanning, with an acceptable PK index memory footprint?*
 > **Decision point:** if the PK index memory or the scan-under-write degradation is bad here,
 > it will not improve with more layers on top. **This is the moment to change direction.**
 
-### M1 — Durable single-table engine
+### M1 — Durable single-table engine — ✅ done
 WAL + group commit, crash recovery, persistent PK index, compaction with backpressure.
-DST and crash-injection harness stood up *in this milestone*, not later.
+DST and crash-injection harness stood up *in this milestone*, not later. (The
+6-hour soak criterion remains a proxy run, not yet performed — see `roadmap.md`.)
 
 > **Decision point:** recovery correct under injected crashes? Compaction stable under
 > sustained load?
 
-### M2 — Query layer
-DataFusion integration via a custom `TableProvider`. SQL surface per §9. sqllogictest and
-SQLancer in CI. Multi-table, joins, transactions across tables.
+### M2 — Query layer — ✅ done (Gate 2 passed)
+SQL surface per §9. sqllogictest and SQLancer oracles. Multi-table, joins,
+transactions. *Delivered differently than written:* DataFusion is integrated via
+a snapshot MemTable, **not** yet a streaming `TableProvider` (that remains future
+work); and a hand-written interpreter was built alongside it (§8). Gate 2 was
+evaluated against DuckDB v1.5.4 and passed.
 
-> **Decision point:** measure against DuckDB on NFR-03 and NFR-04. **This is the real
-> go/no-go.** A decisive NFR-03 win validates the project; parity means reconsider.
+> **Decision point (resolved):** measured against DuckDB on NFR-03 (2.14×
+> degradation, readers never block — DuckDB refuses the workload) and NFR-04
+> (within ~1–2× cold-scan via DataFusion, ahead on distinct-heavy at scale). Go.
 
-### M3 — Lakehouse publication
+### M3 — Lakehouse publication — ⏸️ not started
 Table format abstraction, Delta implementation, two-level commit, publication scheduling,
-external-engine interop tests. Multi-process readers.
+external-engine interop tests. Multi-process readers. *(No Parquet/Delta writer
+exists yet; the hot-tier on-disk format is Arrow IPC. See the naming note in
+`roadmap.md` — the "M3 spike" that shipped was the DataFusion executor, a
+different thing from this lakehouse M3.)*
 
 > **Decision point:** can Spark/DuckDB read our tables correctly, including deletion vectors?
 
-### M4 — Hardening
+### M4 — Hardening — 🔨 in progress
 Soak testing, memory-pressure behavior, operational metrics, documentation, error taxonomy,
-file format versioning and compatibility policy.
+file format versioning and compatibility policy. *Done so far:* no-panic API
+audit + overflow hardening, single-writer directory lock, `COPY` bulk ingest,
+DECIMAL precision enforcement, and this documentation pass.
 
 ### M5 — Reach (only after M4 is solid)
-Python bindings (PyO3 + Arrow PyCapsule, zero-copy to Polars). Then Windows. Then Iceberg.
-Then, if ever, Java.
+Python bindings (PyO3) — ✅ **shipped early** as a standards-based DB-API 2.0
+(PEP 249) driver, `bindings/python/`. Then Windows. Then Iceberg. Then, if ever,
+Java. *(The one M5 item pulled forward; the rest remain future.)*
 
 **On v1.0's ordering:** it front-loaded FFI, multi-language bindings, and Postgres parsing —
 all of which are reach items that depend on a core that does not exist yet. Building the
@@ -1311,19 +1368,23 @@ bindings before the engine produces an impressive demo that cannot become a prod
 
 ## 15. Open Questions Requiring Decisions
 
-1. **Require a primary key on all tables, or allow PK-less append-only tables?**
-   (§5.2 — recommendation: allow both, opt into mutability.)
+1. ~~**Require a primary key on all tables, or allow PK-less append-only tables?**~~
+   **RESOLVED — both.** A table with no declared `PRIMARY KEY` gets a hidden
+   auto-increment `_rowid` key (`schema().synthetic_key()`); a declared key can be
+   any type. (Also resolves the same open question in §5.2.)
 2. **Delta or Iceberg first?** (§6.2 — recommendation: Delta, pending maturity re-verification.)
+   *Still open — lakehouse publication is not started.*
 3. **Default publication interval**, and is seconds-level external staleness acceptable to the
    intended users? (§6.1 — needs real user input, not a guess.)
 4. **Maximum practical table size** we commit to supporting, which follows directly from the PK
-   index memory decision. (§5.2)
+   index memory decision. (§5.2, and now quantified in §2.2: the resident index is ~1.25 B/row.)
 5. **Is the two-level commit model acceptable**, or does some user require the on-disk state to
    be continuously valid? If the latter, the architecture changes substantially.
 6. **What is the actual target workload?** This document assumes streaming ingest plus
    analytics. A concrete first user would sharpen every decision above.
-7. **`croaring` (SIMD, C dependency) vs pure-Rust `roaring` (no SIMD, simulatable)?**
-   §7.4(3) and §11.1(2) pull in opposite directions. Recommendation: start pure-Rust.
+7. ~~**`croaring` vs pure-Rust `roaring`?**~~ **RESOLVED — neither.** The deletion
+   vector is a plain `Vec<(u32, Csn)>` (`src/delete_vector.rs`); no RoaringBitmap
+   dependency was taken. (Moots the same debate in §7.4(3) and §11.1(2).)
 
 ---
 
@@ -1335,7 +1396,7 @@ Verified against primary sources (crates.io API, GitHub API, repo source, specs)
 | Dependency | State | Verdict |
 | :--- | :--- | :--- |
 | **DataFusion** | 54.0.0 (2026-06-08); ~2.5-month major cadence; mature spilling (memory pool, DiskManager, SpillManager, spill compression, pluggable `SpillFile` since 2026-06-29) | **Adopt — and fork.** GreptimeDB, Spice.ai, ParadeDB, InfluxData all carry pinned forks |
-| **arrow-rs** | 59.1.0 (2026-07-07); `simd` feature deleted in 50.0.0; pure autovectorization | Adopt; inherit the no-intrinsics doctrine (§7.4) |
+| **arrow-rs** | pinned to **58** in `Cargo.toml` (to match what DataFusion 54 resolves); `simd` feature deleted in 50.0.0; pure autovectorization | Adopted; inherit the no-intrinsics doctrine (§7.4) |
 | **sqlparser** | 0.62.0 (2026-05-07); every release breaking; ASF/DataFusion PMC governed | Adopt with `PostgreSqlDialect`; pin exactly |
 | **delta-kernel-rs** | DV support implemented (portable 64-bit Roaring, magic `1681511377`) | **Adopt for §6.2** |
 | **iceberg-rust** | ⚠️ Unverified; cited as "nascent" by ParadeDB in 2024 | Defer to M5; verify first |

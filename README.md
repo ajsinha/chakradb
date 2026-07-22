@@ -271,11 +271,15 @@ reasoning does not depend on any of them.
 
 ```
 docs/
-  requirements.md              Architecture & design specification (v2.0)
+  README.md                    Index of the documentation (start here)
+  sql-reference.md             The full SQL surface — statements, types, constraints
+  requirements.md              Architecture & design specification (v2.1)
   roadmap.md                   Milestones, decision gates, stop conditions
+  clickbench-findings.md       Analytics benchmarks vs DuckDB (100k–10M rows)
   arrow-schema-migration.md    The Arrow-native + dynamic-schema rewrite
-  m3-datafusion-spike.md       Adopting DataFusion behind the scan boundary
-  m0/m1/m2-findings.md          Point-in-time milestone records (historical)
+  m3-datafusion-spike.md       Adopting DataFusion behind the scan boundary (historical)
+  m0/m1/m2-findings.md         Point-in-time milestone records (historical)
+  gate2-results.md             The Gate 2 evaluation vs DuckDB (historical)
 src/                           Engine: storage, MVCC, WAL, SQL, DataFusion bridge
 bindings/python/               DB-API 2.0 (PEP 249) driver — works like sqlite3
 tests/                         25 integration suites + SQLancer/sqllogictest oracles

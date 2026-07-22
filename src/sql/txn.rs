@@ -13,8 +13,10 @@
 //! Scope (v1): statements in a transaction run on the interpreter (single-table;
 //! joins/subqueries belong outside a transaction). Referenced tables are
 //! materialised into the overlay on first touch — fine for OLTP-sized working
-//! sets. Commit replays writes op-by-op; crash-atomicity of a multi-statement
-//! commit (WAL transaction markers) is a follow-up.
+//! sets. Commit hands the whole change-set to the backend as one batch, which a
+//! durable backend logs as a single `WalRecord::Txn` — so a multi-statement
+//! commit is crash-atomic (all-or-nothing), with first-committer-wins conflict
+//! detection.
 
 use super::backend::SqlBackend;
 use crate::csn::{Csn, Snapshot};

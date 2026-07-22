@@ -1,5 +1,15 @@
 # M3 Spike — DataFusion over a ChakraDB MVCC snapshot
 
+> **⚠️ Historical record.** This spike answered its question — yes, buy the
+> vectorised executor — and was **promoted and shipped**: DataFusion is now the
+> default analytical engine behind the HTAP router. Two details here are since
+> superseded: (1) the bridge no longer materialises the snapshot into a `MemTable`
+> up front — it is **zero-copy**, since sealed parts already *are* Arrow
+> RecordBatches handed over by `Arc` clone (`arrow-schema-migration.md`); and
+> (2) the "fixed 4-column shape" is gone (arbitrary schemas shipped). The measured
+> numbers below are preserved as the point-in-time record. A streaming
+> `TableProvider` with filter/projection pushdown remains future work.
+
 **Status:** Spike complete, **measured** (not projected).
 **Question:** Does a bought vectorised executor (§8) close the analytics gap
 without breaking the concurrency wedge?

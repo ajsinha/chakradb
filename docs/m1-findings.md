@@ -1,5 +1,12 @@
 # M1 Findings — Durable Single-Table Engine
 
+> **⚠️ Historical record.** A point-in-time report of the M1 durable engine over
+> the fixed four-column schema. The durability results (WAL + group commit, crash
+> recovery, checkpointing) carried forward and still hold. Its "carried into M2"
+> list has since been addressed: the real `PosixIo` backend and demand-paged parts
+> shipped. The one criterion still outstanding is the **6-hour soak** — it remains
+> a short-run proxy, not yet performed (an M4 item). Preserved as written.
+
 **Milestone:** M1 (see `roadmap.md`)
 **Status:** Complete — 3 of 5 acceptance criteria met as written, 2 with stated caveats
 **Verdict:** **PROCEED to M2**, with one requirement formally reclassified and one
