@@ -202,6 +202,51 @@ than inspection, and are regression-tested.
 
 ---
 
+## Limitations & operating envelope
+
+Know these before you reach for it. ChakraDB is deliberately scoped; the wedge
+(§ concurrency) is bought by *not* trying to be everything.
+
+**Size**
+- **In-memory `Database`:** the whole dataset lives in RAM.
+- **Durable `Storage`:** row *data* is on disk, but the **index is fully
+  resident** — Bloom + zonemaps + version stamps + deletion vector, ~1.25 B/row,
+  with no eviction. ~1 B rows ≈ ~1.25 GB resident regardless of row width. That
+  resident index, not disk, is the scaling ceiling.
+- Rows per table are bounded by the `i64` rowid (~9.2×10¹⁸); total mutations ever
+  by the `u64` version clock (~1.8×10¹⁹). Tables per database: memory-bound, no
+  cap.
+
+**Concurrency**
+- **Reads scale freely and never block** — MVCC snapshot reads run lock-free.
+- **Writes are one-per-table** (a per-table lock, held only for the brief L0
+  insert); different tables write concurrently, so write parallelism scales with
+  table count, not within a single table.
+- Durable commits serialize through one WAL append point (group commit amortizes
+  the `fsync`).
+
+**Process model**
+- **Embedded, single process.** "Concurrent users" means threads in your
+  process — there is no server or wire protocol.
+- **⚠️ No cross-process lock yet.** The design calls for a single-writer
+  directory lock, but it is **not currently enforced** — do not open the same
+  durable directory from two processes at once; it can corrupt the store. (This
+  is the top item we're closing; see roadmap.)
+
+**SQL / schema**
+- Single-column `PRIMARY KEY` only (composite keys rejected); **no secondary
+  indexes / `CREATE INDEX`**; no foreign keys (an explicit non-goal).
+- Joins / subqueries / window functions require the DataFusion feature and can't
+  run inside a `BEGIN…COMMIT` transaction (the transactional path is
+  single-table).
+- `DECIMAL` is capped at 38 digits (i128); `AVG` of a decimal returns a float
+  (`SUM`/`MIN`/`MAX` stay exact).
+
+Full treatment in the architecture spec,
+[`docs/requirements.md` §2.2](docs/requirements.md).
+
+---
+
 ## Design principles
 
 1. **Concurrency is the wedge.** ChakraDB competes on serving writes-plus-analytics

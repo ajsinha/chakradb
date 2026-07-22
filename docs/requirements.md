@@ -185,7 +185,8 @@ outcome of the research, not a failure. Better to learn it now than in month nin
 Writing these down is as important as the requirements. **Not** in v1:
 
 - Distributed execution, sharding, or replication.
-- Multi-process *writers*. One writer, enforced by a directory lock.
+- Multi-process *writers*. One writer, to be enforced by a directory lock
+  (specified but **not yet implemented** — see §2.2).
 - **Foreign keys and referential integrity.** ChakraDB holds many tables, each
   with its own primary-key space, and guarantees that a snapshot is consistent
   across all of them — so an application reading two tables observes one
@@ -202,6 +203,58 @@ Writing these down is as important as the requirements. **Not** in v1:
 - User-defined functions, extensions, stored procedures.
 - Larger-than-memory *working sets* beyond what the underlying engine provides.
 - Secondary indexes. Primary key index only.
+
+---
+
+### 2.2 Operating envelope & current limitations
+
+The non-goals above are *design* choices. This section states the concrete
+**limits of the current implementation** — the envelope a caller must design
+within. Where the code does not yet match the spec, that is called out as a gap
+to close, not glossed over.
+
+**Size / memory**
+
+| Dimension | Limit | Basis |
+| :--- | :--- | :--- |
+| In-memory `Database` | dataset must fit in RAM | parts + L0 held in memory |
+| Durable `Storage` | **resident index ~1.25 B/row**, no eviction | §5.2; Bloom + zonemaps + version stamps + deletion vector are always resident, data faults from disk |
+| Rows per table | `i64` rowid → ~9.2×10¹⁸ | `Table::next_rowid` |
+| Total mutations (lifetime) | `u64` CSN → ~1.8×10¹⁹ | monotonic, never reset (§5.3) |
+| Tables per database | memory-bound, no hard cap | `BTreeMap<String, Arc<Table>>` catalog |
+
+The **resident index, not disk capacity, is the scaling ceiling** for the durable
+engine: ~1 B rows ≈ ~1.25 GB resident regardless of row width. There is no buffer
+pool / LRU (§7.3 explains why — parts are immutable and whole-part granular).
+
+**Concurrency**
+
+- Readers scale without bound and never block: MVCC snapshot reads clone the part
+  list under a brief read lock, then scan lock-free (§7.1).
+- **Writes are serialized per table** by a `RwLock<TableInner>`. Different tables
+  commit concurrently, so write throughput scales with *table count*, not within
+  one table. A single hot table is a single-writer bottleneck by design.
+- Durable commits funnel through one WAL append mutex; group commit amortizes the
+  `fsync` across concurrent committers (§7.2).
+
+**Process model — the one spec/code gap**
+
+- C-1 and §2.1 specify a **single-writer directory lock**. **This is not yet
+  implemented** — `trait Io` has no lock primitive and `Storage::open` does not
+  acquire one. Two processes opening the same durable directory can therefore
+  corrupt it. Closing this (an advisory `flock`-style lock at the `Io` layer,
+  released automatically on process exit) is the top hardening item for M4.
+- Reader processes (C-3) are likewise unguarded against a concurrent writer until
+  the lock lands.
+
+**SQL / schema (implementation state, complementing §9)**
+
+- Single-column `PRIMARY KEY` only; composite keys are rejected at plan time.
+- No secondary indexes / `CREATE INDEX`; no foreign keys (non-goal above).
+- The interpreter is single-table; joins/subqueries/windows require DataFusion and
+  cannot run inside a transaction.
+- `DECIMAL` is `i128`-backed → 38 significant digits; `AVG(decimal)` returns a
+  float (`SUM`/`MIN`/`MAX` are exact).
 
 ---
 
