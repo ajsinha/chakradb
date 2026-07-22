@@ -198,6 +198,10 @@ impl Table {
                 if matches!(row.values[ki], Value::Null) {
                     row.values[ki] = Value::Int(inner.next_rowid);
                     inner.next_rowid += 1;
+                } else if let Value::Int(n) = row.values[ki] {
+                    // Rows loaded with an existing rowid must not be handed out
+                    // again to a later insert.
+                    inner.next_rowid = inner.next_rowid.max(n + 1);
                 }
             }
         }

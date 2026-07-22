@@ -28,6 +28,8 @@ pub trait SqlBackend: Send + Sync {
     /// A snapshot consistent across the catalog.
     fn snapshot(&self) -> Snapshot;
     fn insert(&self, table: &str, row: Row) -> Result<Csn>;
+    /// Insert or replace — used to replay a committed transaction's writes.
+    fn upsert(&self, table: &str, row: Row) -> Result<Csn>;
     fn update(&self, table: &str, row: Row) -> Result<Csn>;
     fn delete(&self, table: &str, key: &Value) -> Result<Csn>;
 }
@@ -47,6 +49,9 @@ impl SqlBackend for Database {
     }
     fn insert(&self, table: &str, row: Row) -> Result<Csn> {
         Database::table(self, table)?.insert(row)
+    }
+    fn upsert(&self, table: &str, row: Row) -> Result<Csn> {
+        Database::table(self, table)?.upsert(row)
     }
     fn update(&self, table: &str, row: Row) -> Result<Csn> {
         Database::table(self, table)?.update(row)
@@ -75,6 +80,9 @@ impl SqlBackend for Storage {
     }
     fn insert(&self, table: &str, row: Row) -> Result<Csn> {
         Storage::insert(self, table, row)
+    }
+    fn upsert(&self, table: &str, row: Row) -> Result<Csn> {
+        Storage::upsert(self, table, row)
     }
     fn update(&self, table: &str, row: Row) -> Result<Csn> {
         Storage::update(self, table, row)

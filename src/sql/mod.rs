@@ -25,24 +25,29 @@ pub mod df;
 pub mod exec;
 pub mod expr;
 pub mod plan;
+pub mod txn;
 pub mod value;
 
 pub use backend::SqlBackend;
 pub use exec::{execute, Outcome};
 pub use plan::{plan, plan_in, Plan};
 pub use plan::{AggFn, Projection};
+pub use txn::Transaction;
 pub use value::Value;
 
 use crate::database::Database;
 use crate::error::Error;
 use crate::storage::Storage;
-use std::sync::Arc;
+use plan::{txn_control, TxnControl};
+use std::sync::{Arc, Mutex};
 
 /// A SQL front-end bound to a catalog. The catalog is either an in-memory
 /// [`Database`] or a durable [`Storage`]; with the latter, SQL writes are logged
 /// to the WAL and survive a crash.
 pub struct SqlEngine {
     backend: Arc<dyn SqlBackend>,
+    /// The open transaction, if any. `None` means autocommit.
+    txn: Mutex<Option<Transaction>>,
 }
 
 impl std::fmt::Debug for SqlEngine {
@@ -67,12 +72,23 @@ fn plan_key_index(backend: &Arc<dyn SqlBackend>, plan: &Plan) -> usize {
 impl SqlEngine {
     /// Bind to an in-memory database (no durability).
     pub fn new(db: Arc<Database>) -> Self {
-        SqlEngine { backend: db }
+        SqlEngine {
+            backend: db,
+            txn: Mutex::new(None),
+        }
     }
 
     /// Bind to durable storage: SQL writes are WAL-logged and crash-safe.
     pub fn durable(storage: Arc<Storage>) -> Self {
-        SqlEngine { backend: storage }
+        SqlEngine {
+            backend: storage,
+            txn: Mutex::new(None),
+        }
+    }
+
+    /// True if a transaction is currently open.
+    pub fn in_transaction(&self) -> bool {
+        self.txn.lock().unwrap().is_some()
     }
 
     /// Parse, plan, and execute one statement — the HTAP router.
@@ -88,6 +104,24 @@ impl SqlEngine {
     /// Without the `datafusion` feature, everything runs on the interpreter (the
     /// analytical shapes just run slower, and joins/subqueries are rejected).
     pub fn run(&self, sql: &str) -> Result<Outcome, Error> {
+        // Transaction control comes first.
+        if let Some(ctl) = txn_control(sql) {
+            return self.run_txn_control(ctl);
+        }
+
+        // Inside a transaction, every statement runs on the interpreter against
+        // the private overlay (read-your-writes; nothing hits the real WAL until
+        // COMMIT). Joins/subqueries are unsupported here — use them outside a
+        // transaction.
+        {
+            let guard = self.txn.lock().unwrap();
+            if let Some(txn) = guard.as_ref() {
+                let plan = plan_in(sql, txn).map_err(Error::Sql)?;
+                return execute(txn, plan);
+            }
+        }
+
+        // Autocommit path.
         match plan_in(sql, &*self.backend) {
             Ok(plan) => {
                 #[cfg(feature = "datafusion")]
@@ -113,6 +147,39 @@ impl SqlEngine {
                 }
             }
         }
+    }
+
+    fn run_txn_control(&self, ctl: TxnControl) -> Result<Outcome, Error> {
+        let mut guard = self.txn.lock().unwrap();
+        match ctl {
+            TxnControl::Begin => {
+                if guard.is_some() {
+                    return Err(Error::Sql("a transaction is already open".into()));
+                }
+                *guard = Some(Transaction::begin(self.backend.clone()));
+            }
+            TxnControl::Commit => match guard.take() {
+                Some(t) => t.commit()?,
+                None => return Err(Error::Sql("no transaction to commit".into())),
+            },
+            TxnControl::Rollback => {
+                // Dropping the transaction discards the overlay and change-set.
+                *guard = None;
+            }
+        }
+        Ok(Outcome::Affected(0))
+    }
+
+    /// Begin/commit/rollback for drivers that manage transactions explicitly
+    /// (e.g. the Python DB-API layer), without round-tripping SQL text.
+    pub fn begin(&self) -> Result<(), Error> {
+        self.run_txn_control(TxnControl::Begin).map(|_| ())
+    }
+    pub fn commit(&self) -> Result<(), Error> {
+        self.run_txn_control(TxnControl::Commit).map(|_| ())
+    }
+    pub fn rollback(&self) -> Result<(), Error> {
+        self.run_txn_control(TxnControl::Rollback).map(|_| ())
     }
 
     /// Convenience: run a query and return its rows, or an error for

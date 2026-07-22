@@ -99,6 +99,29 @@ pub fn plan_in(sql: &str, be: &dyn crate::sql::SqlBackend) -> Result<Plan, Strin
     plan_with(sql, &|name| be.table(name).ok().map(|t| t.schema().clone()))
 }
 
+/// A transaction-control statement, if `sql` is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxnControl {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+/// Detect `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK`.
+pub fn txn_control(sql: &str) -> Option<TxnControl> {
+    let dialect = PostgreSqlDialect {};
+    let mut stmts = Parser::parse_sql(&dialect, sql).ok()?;
+    if stmts.len() != 1 {
+        return None;
+    }
+    match stmts.pop()? {
+        sa::Statement::StartTransaction { .. } => Some(TxnControl::Begin),
+        sa::Statement::Commit { .. } => Some(TxnControl::Commit),
+        sa::Statement::Rollback { .. } => Some(TxnControl::Rollback),
+        _ => None,
+    }
+}
+
 /// Whether `sql` is a single read query (`SELECT`/`WITH`) — used to route
 /// queries to the DataFusion executor while writes stay on the interpreter.
 pub fn is_query(sql: &str) -> bool {
