@@ -78,6 +78,12 @@ impl Value {
         matches!(self, Value::Bool(true))
     }
 
+    /// Definitely false — `NULL`/UNKNOWN is *not* false. A `CHECK` constraint is
+    /// violated only by a definite FALSE, so this is the test it uses.
+    pub fn is_false(&self) -> bool {
+        matches!(self, Value::Bool(false))
+    }
+
     /// Numeric coercion. `None` for non-numbers and NULL.
     pub fn as_f64(&self) -> Option<f64> {
         match self {

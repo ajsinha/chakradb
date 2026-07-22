@@ -167,41 +167,104 @@ fn schema_from_ddl(ct: &sa::CreateTable) -> Result<Schema, String> {
     }
     let mut columns = Vec::with_capacity(ct.columns.len());
     let mut pk: Option<usize> = None;
+    let mut checks: Vec<String> = Vec::new();
     for (i, col) in ct.columns.iter().enumerate() {
         let name = col.name.value.clone();
         let ty = DataType::parse(&col.data_type.to_string())
             .ok_or_else(|| format!("unsupported column type for {name}: {}", col.data_type))?;
-        // Column-level PRIMARY KEY.
-        let is_pk = col
-            .options
-            .iter()
-            .any(|o| matches!(o.option, sa::ColumnOption::PrimaryKey(_)));
-        if is_pk {
-            if pk.is_some() {
-                return Err("multiple PRIMARY KEY columns are unsupported".into());
+        let mut def = ColumnDef::new(name.clone(), ty);
+        for o in &col.options {
+            match &o.option {
+                sa::ColumnOption::PrimaryKey(_) => {
+                    if pk.is_some() {
+                        return Err("multiple PRIMARY KEY columns are unsupported".into());
+                    }
+                    pk = Some(i);
+                }
+                sa::ColumnOption::NotNull => def.nullable = false,
+                sa::ColumnOption::Null => def.nullable = true,
+                sa::ColumnOption::Default(e) => {
+                    let v = literal_value(e)
+                        .map_err(|_| format!("DEFAULT for {name} must be a literal"))?
+                        .coerce(ty)
+                        .ok_or_else(|| format!("DEFAULT for {name} does not fit its type"))?;
+                    def.default = Some(v);
+                }
+                sa::ColumnOption::Check(c) => checks.push(c.expr.to_string()),
+                other => return Err(format!("unsupported column option on {name}: {other:?}")),
             }
-            pk = Some(i);
         }
-        columns.push(ColumnDef::new(name, ty));
+        columns.push(def);
     }
-    // Table-level PRIMARY KEY (single column).
+    // Table-level constraints: single-column PRIMARY KEY and CHECK.
     for c in &ct.constraints {
-        if let sa::TableConstraint::PrimaryKey(pkc) = c {
-            if pkc.columns.len() != 1 {
-                return Err("composite PRIMARY KEY is unsupported".into());
+        match c {
+            sa::TableConstraint::PrimaryKey(pkc) => {
+                if pkc.columns.len() != 1 {
+                    return Err("composite PRIMARY KEY is unsupported".into());
+                }
+                let name = match &pkc.columns[0].column.expr {
+                    sa::Expr::Identifier(id) => id.value.clone(),
+                    other => other.to_string(),
+                };
+                let idx = columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(&name))
+                    .ok_or_else(|| format!("PRIMARY KEY names unknown column: {name}"))?;
+                pk = Some(idx);
             }
-            let name = match &pkc.columns[0].column.expr {
-                sa::Expr::Identifier(id) => id.value.clone(),
-                other => other.to_string(),
-            };
-            let idx = columns
-                .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(&name))
-                .ok_or_else(|| format!("PRIMARY KEY names unknown column: {name}"))?;
-            pk = Some(idx);
+            sa::TableConstraint::Check(chk) => checks.push(chk.expr.to_string()),
+            other => return Err(format!("unsupported table constraint: {other:?}")),
         }
     }
-    Ok(Schema::from_user_columns(columns, pk))
+    Ok(Schema::from_user_columns(columns, pk).with_checks(checks))
+}
+
+/// Parse a table's `CHECK` clauses (stored as SQL text on the schema) into
+/// planned expressions, paired with their text for error messages. Done once
+/// per write statement, then evaluated per row.
+pub(crate) fn planned_checks(schema: &Schema) -> Result<Vec<(String, Expr)>, String> {
+    schema
+        .checks()
+        .iter()
+        .map(|t| Ok((t.clone(), parse_predicate(t, schema)?)))
+        .collect()
+}
+
+/// Parse a standalone boolean predicate (a `CHECK` body) against `schema`.
+fn parse_predicate(text: &str, schema: &Schema) -> Result<Expr, String> {
+    let stmts = Parser::parse_sql(&PostgreSqlDialect {}, &format!("SELECT {text}"))
+        .map_err(|e| format!("bad CHECK expression `{text}`: {e}"))?;
+    let expr = match stmts.as_slice() {
+        [sa::Statement::Query(q)] => match q.body.as_ref() {
+            sa::SetExpr::Select(s) if s.projection.len() == 1 => match &s.projection[0] {
+                sa::SelectItem::UnnamedExpr(e) => e,
+                other => return Err(format!("unsupported CHECK expression: {other:?}")),
+            },
+            _ => return Err(format!("unsupported CHECK expression: {text}")),
+        },
+        _ => return Err(format!("unsupported CHECK expression: {text}")),
+    };
+    plan_expr(expr, schema)
+}
+
+/// Enforce a table's constraints on a fully-materialised row: `NOT NULL`, then
+/// each `CHECK` (violated only by a definite FALSE — NULL/UNKNOWN passes, per
+/// SQL). Used by both the INSERT and UPDATE paths.
+pub(crate) fn enforce_constraints(
+    schema: &Schema,
+    checks: &[(String, Expr)],
+    row: &Row,
+) -> Result<(), crate::error::Error> {
+    schema.check_not_null(row)?;
+    for (text, expr) in checks {
+        if expr.eval(row).is_false() {
+            return Err(crate::error::Error::ConstraintViolation(format!(
+                "CHECK ({text}) failed"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn object_name(n: &sa::ObjectName) -> String {
@@ -243,19 +306,33 @@ fn plan_insert(ins: sa::Insert, schema_for: SchemaFor) -> Result<Plan, String> {
             })
             .collect::<Result<_, _>>()?
     };
+    let checks = planned_checks(&schema)?;
     let mut rows = Vec::with_capacity(values.len());
     for tuple in values {
         if tuple.content.len() != col_order.len() {
             return Err("INSERT column/value count mismatch".into());
         }
         let mut fields = vec![Value::Null; schema.arity()];
+        let mut provided = vec![false; schema.arity()];
         for (&slot, e) in col_order.iter().zip(tuple.content) {
             let ty = schema.column(slot).ty;
             fields[slot] = literal_value(&e)?
                 .coerce(ty)
                 .ok_or_else(|| format!("value does not fit column {}", schema.column(slot).name))?;
+            provided[slot] = true;
         }
-        rows.push(Row::from_values(fields));
+        // Columns the INSERT omitted take their DEFAULT (an explicit NULL is
+        // "provided" and keeps NULL — it is not replaced by the default).
+        for (i, c) in schema.columns().iter().enumerate() {
+            if !provided[i] {
+                if let Some(d) = &c.default {
+                    fields[i] = d.clone();
+                }
+            }
+        }
+        let row = Row::from_values(fields);
+        enforce_constraints(&schema, &checks, &row).map_err(|e| e.to_string())?;
+        rows.push(row);
     }
     Ok(Plan::Insert { table, rows })
 }

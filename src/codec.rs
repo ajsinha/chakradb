@@ -114,16 +114,35 @@ impl Encoder {
         self
     }
 
-    /// A table schema: columns (name + type tag), key index, and rowid flag.
+    /// A table schema: version, columns (name, type, nullable, default), key
+    /// index, rowid flag, and table-level CHECK clauses.
     pub fn schema(&mut self, s: &crate::schema::Schema) -> &mut Self {
+        self.u8(SCHEMA_VERSION);
         self.u32(s.arity() as u32);
         for c in s.columns() {
             self.str(&c.name).u8(datatype_tag(c.ty));
+            self.u8(c.nullable as u8);
+            match &c.default {
+                Some(v) => {
+                    self.u8(1).value(v);
+                }
+                None => {
+                    self.u8(0);
+                }
+            }
         }
         self.u32(s.key_index() as u32).u8(s.synthetic_key() as u8);
+        self.u32(s.checks().len() as u32);
+        for chk in s.checks() {
+            self.str(chk);
+        }
         self
     }
 }
+
+/// Schema encoding version. v2 adds per-column nullable + default and
+/// table-level CHECK clauses over the original v1 layout.
+const SCHEMA_VERSION: u8 = 2;
 
 fn datatype_tag(ty: crate::value::DataType) -> u8 {
     use crate::value::DataType::*;
@@ -249,19 +268,37 @@ impl<'a> Decoder<'a> {
     /// Decode a table schema (mirror of [`Encoder::schema`]).
     pub fn schema(&mut self) -> DecodeResult<crate::schema::Schema> {
         use crate::schema::ColumnDef;
+        let version = self.u8()?;
+        if version != SCHEMA_VERSION {
+            return Err(DecodeError::Malformed("unsupported schema version"));
+        }
         let n = self.u32()? as usize;
         let mut columns = Vec::with_capacity(n);
         for _ in 0..n {
             let name = self.string()?;
             let ty = tag_datatype(self.u8()?).ok_or(DecodeError::Malformed("bad type tag"))?;
-            columns.push(ColumnDef::new(name, ty));
+            let nullable = self.u8()? != 0;
+            let default = if self.u8()? != 0 {
+                Some(self.value()?)
+            } else {
+                None
+            };
+            let mut col = ColumnDef::new(name, ty);
+            col.nullable = nullable;
+            col.default = default;
+            columns.push(col);
         }
         let key_index = self.u32()? as usize;
         let synthetic = self.u8()? != 0;
         if key_index >= columns.len() {
             return Err(DecodeError::Malformed("key_index out of range"));
         }
-        Ok(crate::schema::Schema::new(columns, key_index, synthetic))
+        let n_checks = self.u32()? as usize;
+        let mut checks = Vec::with_capacity(n_checks);
+        for _ in 0..n_checks {
+            checks.push(self.string()?);
+        }
+        Ok(crate::schema::Schema::new(columns, key_index, synthetic).with_checks(checks))
     }
 }
 
@@ -444,5 +481,31 @@ mod tests {
         d.u64().unwrap();
         assert_eq!(d.pos(), 8);
         assert_eq!(d.remaining(), 8);
+    }
+
+    #[test]
+    fn schema_roundtrips_constraints() {
+        use crate::schema::{ColumnDef, Schema};
+        use crate::value::{DataType, Value};
+        let schema = Schema::new(
+            vec![
+                ColumnDef::new("id", DataType::Int).not_null(),
+                ColumnDef::new("status", DataType::Text).with_default(Value::Text("new".into())),
+                ColumnDef::new("age", DataType::Int),
+            ],
+            0,
+            false,
+        )
+        .with_checks(vec!["age >= 0".into()]);
+
+        let mut e = Encoder::new();
+        e.schema(&schema);
+        let got = Decoder::new(e.as_slice()).schema().unwrap();
+
+        assert!(!got.column(0).nullable, "NOT NULL survives");
+        assert_eq!(got.column(1).default, Some(Value::Text("new".into())));
+        assert!(got.column(2).nullable);
+        assert_eq!(got.checks(), &["age >= 0".to_string()]);
+        assert!(schema.same_shape(&got));
     }
 }

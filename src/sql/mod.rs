@@ -142,13 +142,18 @@ impl SqlEngine {
                 }
                 execute(&*self.backend, plan)
             }
-            // The interpreter can't plan this (join / subquery / window). With
-            // DataFusion, hand it the raw SQL; without it, surface the error.
+            // The interpreter can't plan this. With DataFusion, hand it the raw
+            // SQL — but only for a SELECT (a join / subquery / window it doesn't
+            // support). A write or DDL that failed to plan — e.g. a constraint
+            // violation or an unsupported column option — is a real error to
+            // surface, not something to retry on the read-only vectorised engine.
             Err(e) => {
                 #[cfg(feature = "datafusion")]
                 {
-                    let _ = &e;
-                    df::execute_query(&*self.backend, sql)
+                    if plan::is_query(sql) {
+                        return df::execute_query(&*self.backend, sql);
+                    }
+                    Err(Error::Sql(e))
                 }
                 #[cfg(not(feature = "datafusion"))]
                 {

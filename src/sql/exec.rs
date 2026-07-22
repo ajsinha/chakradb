@@ -97,14 +97,22 @@ fn exec_update(
     let t = be.table(table)?;
     let snap = be.snapshot();
     let schema = t.schema().clone();
+    let checks = super::plan::planned_checks(&schema).map_err(Error::Sql)?;
     let targets: Vec<Row> = t.scan(snap).iter().filter(|r| passes(&filter, r)).collect();
-    let mut n = 0;
+    // Compute and constraint-check every updated row *before* applying any, so a
+    // violation aborts the whole statement instead of leaving a partial update.
+    let mut updated = Vec::with_capacity(targets.len());
     for mut row in targets {
         for (idx, expr) in &sets {
             let v = expr.eval(&row);
             let ty = schema.column(*idx).ty;
             row.values[*idx] = v.coerce(ty).unwrap_or(Value::Null);
         }
+        super::plan::enforce_constraints(&schema, &checks, &row)?;
+        updated.push(row);
+    }
+    let mut n = 0;
+    for row in updated {
         if be.update(table, row).is_ok() {
             n += 1;
         }

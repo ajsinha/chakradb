@@ -28,14 +28,34 @@ pub const ROWID: &str = "_rowid";
 pub struct ColumnDef {
     pub name: String,
     pub ty: DataType,
+    /// `false` for a `NOT NULL` column (and for a user `PRIMARY KEY`, which is
+    /// implicitly `NOT NULL`). Defaults to `true` — SQL columns are nullable.
+    pub nullable: bool,
+    /// A literal `DEFAULT` applied to this column when an `INSERT` omits it.
+    pub default: Option<Value>,
 }
 
 impl ColumnDef {
+    /// A plain nullable column with no default.
     pub fn new(name: impl Into<String>, ty: DataType) -> Self {
         ColumnDef {
             name: name.into(),
             ty,
+            nullable: true,
+            default: None,
         }
+    }
+
+    /// Mark this column `NOT NULL` (builder style).
+    pub fn not_null(mut self) -> Self {
+        self.nullable = false;
+        self
+    }
+
+    /// Give this column a literal `DEFAULT` (builder style).
+    pub fn with_default(mut self, v: Value) -> Self {
+        self.default = Some(v);
+        self
     }
 }
 
@@ -46,6 +66,10 @@ pub struct Schema {
     columns: Vec<ColumnDef>,
     key_index: usize,
     synthetic_key: bool,
+    /// Table-level `CHECK` predicates, stored as the original SQL text. Kept as
+    /// text (not a parsed expression) so this core type stays free of the SQL
+    /// layer; the executor parses and evaluates them against each written row.
+    checks: Vec<String>,
     arrow: SchemaRef,
 }
 
@@ -72,15 +96,32 @@ impl Schema {
             columns,
             key_index,
             synthetic_key,
+            checks: Vec::new(),
             arrow,
         }
+    }
+
+    /// Attach table-level `CHECK` predicates (builder style). Each entry is the
+    /// SQL text of one check clause.
+    pub fn with_checks(mut self, checks: Vec<String>) -> Self {
+        self.checks = checks;
+        self
+    }
+
+    /// The table-level `CHECK` predicates, as SQL text.
+    pub fn checks(&self) -> &[String] {
+        &self.checks
     }
 
     /// User columns plus a hidden `_rowid` key appended at the end. `key` is the
     /// index of a user PRIMARY KEY column, or `None` for a rowid table.
     pub fn from_user_columns(mut columns: Vec<ColumnDef>, key: Option<usize>) -> Self {
         match key {
-            Some(k) => Schema::new(columns, k, false),
+            Some(k) => {
+                // A PRIMARY KEY column is implicitly NOT NULL.
+                columns[k].nullable = false;
+                Schema::new(columns, k, false)
+            }
             None => {
                 let key_index = columns.len();
                 columns.push(ColumnDef::new(ROWID, DataType::Int));
@@ -163,11 +204,43 @@ impl Schema {
         Ok(())
     }
 
-    /// Two schemas are structurally equal (columns, key, rowid flag).
+    /// Fill any column an `INSERT` left as `NULL` with its declared `DEFAULT`.
+    /// A column with no default keeps its `NULL` (which a later `NOT NULL` check
+    /// may then reject). The synthesised rowid key is left untouched — the table
+    /// assigns it.
+    pub fn apply_defaults(&self, row: &mut Row) {
+        for (i, c) in self.columns.iter().enumerate() {
+            if matches!(row.values[i], Value::Null) {
+                if let Some(d) = &c.default {
+                    row.values[i] = d.clone();
+                }
+            }
+        }
+    }
+
+    /// Reject a row that puts `NULL` in a `NOT NULL` column. A synthesised rowid
+    /// key is exempt — it is assigned by the table after this check.
+    pub fn check_not_null(&self, row: &Row) -> Result<()> {
+        for (i, c) in self.columns.iter().enumerate() {
+            if self.synthetic_key && i == self.key_index {
+                continue;
+            }
+            if !c.nullable && matches!(row.values.get(i), Some(Value::Null) | None) {
+                return Err(Error::ConstraintViolation(format!(
+                    "NULL in NOT NULL column {}",
+                    c.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Two schemas are structurally equal (columns, key, rowid flag, checks).
     pub fn same_shape(&self, other: &Schema) -> bool {
         self.columns == other.columns
             && self.key_index == other.key_index
             && self.synthetic_key == other.synthetic_key
+            && self.checks == other.checks
     }
 }
 

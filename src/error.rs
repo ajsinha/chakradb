@@ -24,6 +24,8 @@ pub enum Error {
     TableExists(String),
     /// A SQL parse, plan, or type error.
     Sql(String),
+    /// A row violated a declared constraint (NOT NULL, CHECK).
+    ConstraintViolation(String),
 }
 
 impl fmt::Display for Error {
@@ -36,6 +38,7 @@ impl fmt::Display for Error {
             Error::TableNotFound(name) => write!(f, "table not found: {name}"),
             Error::TableExists(name) => write!(f, "table already exists: {name}"),
             Error::Sql(msg) => write!(f, "sql error: {msg}"),
+            Error::ConstraintViolation(msg) => write!(f, "constraint violation: {msg}"),
         }
     }
 }
