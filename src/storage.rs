@@ -131,6 +131,9 @@ impl Storage {
                         report.wal_records_replayed += 1;
                     }
                 }
+                WalRecord::Txn { ops } => {
+                    report.wal_records_replayed += ops.len();
+                }
                 WalRecord::Seal { .. } | WalRecord::Checkpoint { .. } => {}
             }
         }
@@ -202,6 +205,20 @@ impl Storage {
                     if let Some(n) = by_id.get(table) {
                         if let Ok(t) = self.db.table(n) {
                             t.replay_delete(key, *csn);
+                        }
+                    }
+                }
+                WalRecord::Txn { ops } => {
+                    // A committed transaction, applied atomically (the frame was
+                    // intact or the whole record was discarded as torn).
+                    for op in ops {
+                        let Some(n) = by_id.get(&op.table) else {
+                            continue;
+                        };
+                        let Ok(t) = self.db.table(n) else { continue };
+                        match &op.kind {
+                            crate::wal::TxnKind::Put(row) => t.replay_insert(row.clone(), op.csn),
+                            crate::wal::TxnKind::Delete(key) => t.replay_delete(key, op.csn),
                         }
                     }
                 }
@@ -402,6 +419,47 @@ impl Storage {
             key: key.clone(),
         })?;
         Ok(csn)
+    }
+
+    /// Commit a transaction's writes as **one** WAL record, so a crash
+    /// mid-commit is all-or-nothing (a torn record is discarded on recovery).
+    pub fn commit_transaction(&self, writes: Vec<crate::sql::backend::TxnWrite>) -> Result<Csn> {
+        use crate::sql::backend::TxnWrite;
+        use crate::wal::{TxnKind, TxnOp};
+        self.warm();
+        let mut ops = Vec::with_capacity(writes.len());
+        let mut last = 0;
+        for w in writes {
+            match w {
+                TxnWrite::Put(table, row) => {
+                    let id = self.table_id(&table)?;
+                    let t = self.db.table(&table)?;
+                    let (csn, stored) = t.upsert_returning(row)?;
+                    last = csn;
+                    ops.push(TxnOp {
+                        table: id,
+                        csn,
+                        kind: TxnKind::Put(stored),
+                    });
+                }
+                TxnWrite::Delete(table, key) => {
+                    let id = self.table_id(&table)?;
+                    let t = self.db.table(&table)?;
+                    if let Ok(csn) = t.delete(&key) {
+                        last = csn;
+                        ops.push(TxnOp {
+                            table: id,
+                            csn,
+                            kind: TxnKind::Delete(key),
+                        });
+                    }
+                }
+            }
+        }
+        if !ops.is_empty() {
+            self.log(WalRecord::Txn { ops })?;
+        }
+        Ok(last)
     }
 
     fn log(&self, rec: WalRecord) -> Result<()> {

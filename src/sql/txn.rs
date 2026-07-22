@@ -19,7 +19,7 @@
 use super::backend::SqlBackend;
 use crate::csn::{Csn, Snapshot};
 use crate::database::Database;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::schema::{Row, Schema};
 use crate::table::Table;
 use crate::value::{Key, Value};
@@ -99,38 +99,52 @@ impl Transaction {
     }
 
     /// Apply the change-set to the real backend. Consumes the transaction.
+    ///
+    /// The writes are handed over as one batch, so a durable backend logs them
+    /// as a single crash-atomic WAL record.
     pub fn commit(self) -> Result<()> {
+        use super::backend::TxnWrite;
         let writes = std::mem::take(&mut self.inner.lock().unwrap().writes);
+
+        // Conflict detection (first-committer-wins): if any key we wrote was
+        // changed by another committed transaction since we began — i.e. its
+        // current committed value differs from what we saw at BEGIN — abort.
+        // Synthetic-rowid inserts never conflict (each is a brand-new row).
+        for (table, table_writes) in &writes {
+            if let Ok(rt) = self.real.table(table) {
+                if rt.schema().synthetic_key() {
+                    continue;
+                }
+                for key in table_writes.keys() {
+                    if rt.get(&key.0, self.snapshot) != rt.get_latest(&key.0) {
+                        return Err(Error::WriteConflict);
+                    }
+                }
+            }
+        }
+
+        let mut batch = Vec::new();
         for (table, table_writes) in writes {
-            let synthetic = self
+            let (synthetic, key_index) = self
                 .real
                 .table(&table)
-                .map(|t| t.schema().synthetic_key())
-                .unwrap_or(false);
-            let key_index = self
-                .real
-                .table(&table)
-                .map(|t| t.schema().key_index())
-                .unwrap_or(0);
-            for (_key, op) in table_writes {
+                .map(|t| (t.schema().synthetic_key(), t.schema().key_index()))
+                .unwrap_or((false, 0));
+            for (key, op) in table_writes {
                 match op {
                     Some(mut row) => {
                         if synthetic {
                             // The overlay's rowid does not align with the real
                             // table's; let the real table assign a fresh one.
                             row.values[key_index] = Value::Null;
-                            self.real.insert(&table, row)?;
-                        } else {
-                            self.real.upsert(&table, row)?;
                         }
+                        batch.push(TxnWrite::Put(table.clone(), row));
                     }
-                    None => {
-                        let _ = self.real.delete(&table, &_key.0);
-                    }
+                    None => batch.push(TxnWrite::Delete(table.clone(), key.0)),
                 }
             }
         }
-        Ok(())
+        self.real.commit_batch(batch)
     }
 }
 

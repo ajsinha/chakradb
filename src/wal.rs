@@ -24,6 +24,23 @@ const OP_INSERT: u8 = 1;
 const OP_DELETE: u8 = 2;
 const OP_SEAL: u8 = 3;
 const OP_CHECKPOINT: u8 = 4;
+const OP_TXN: u8 = 5;
+const TXN_PUT: u8 = 1;
+const TXN_DEL: u8 = 2;
+
+/// One write inside a committed transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TxnOp {
+    pub table: u32,
+    pub csn: Csn,
+    pub kind: TxnKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TxnKind {
+    Put(Row),
+    Delete(Value),
+}
 
 /// One logged mutation.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +68,13 @@ pub enum WalRecord {
     Checkpoint {
         csn: Csn,
     },
+    /// A committed transaction: all its writes as **one** record. Because a WAL
+    /// record is framed with a length and CRC, it is applied all-or-nothing — a
+    /// crash mid-commit leaves a torn frame that recovery discards, so the
+    /// transaction never partially appears.
+    Txn {
+        ops: Vec<TxnOp>,
+    },
 }
 
 impl WalRecord {
@@ -60,6 +84,7 @@ impl WalRecord {
             | WalRecord::Delete { csn, .. }
             | WalRecord::Seal { csn, .. }
             | WalRecord::Checkpoint { csn } => *csn,
+            WalRecord::Txn { ops } => ops.iter().map(|o| o.csn).max().unwrap_or(0),
         }
     }
 
@@ -68,7 +93,7 @@ impl WalRecord {
             WalRecord::Insert { table, .. }
             | WalRecord::Delete { table, .. }
             | WalRecord::Seal { table, .. } => Some(*table),
-            WalRecord::Checkpoint { .. } => None,
+            WalRecord::Checkpoint { .. } | WalRecord::Txn { .. } => None,
         }
     }
 
@@ -90,6 +115,20 @@ impl WalRecord {
             }
             WalRecord::Checkpoint { csn } => {
                 e.u8(OP_CHECKPOINT).u64(*csn);
+            }
+            WalRecord::Txn { ops } => {
+                e.u8(OP_TXN).u32(ops.len() as u32);
+                for op in ops {
+                    e.u32(op.table).u64(op.csn);
+                    match &op.kind {
+                        TxnKind::Put(row) => {
+                            e.u8(TXN_PUT).row(row);
+                        }
+                        TxnKind::Delete(key) => {
+                            e.u8(TXN_DEL).value(key);
+                        }
+                    }
+                }
             }
         }
         frame(e.as_slice())
@@ -114,6 +153,21 @@ impl WalRecord {
                 part_id: d.u64()?,
             }),
             OP_CHECKPOINT => Ok(WalRecord::Checkpoint { csn: d.u64()? }),
+            OP_TXN => {
+                let n = d.u32()? as usize;
+                let mut ops = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let table = d.u32()?;
+                    let csn = d.u64()?;
+                    let kind = match d.u8()? {
+                        TXN_PUT => TxnKind::Put(d.row()?),
+                        TXN_DEL => TxnKind::Delete(d.value()?),
+                        _ => return Err(DecodeError::Malformed("bad txn op")),
+                    };
+                    ops.push(TxnOp { table, csn, kind });
+                }
+                Ok(WalRecord::Txn { ops })
+            }
             _ => Err(DecodeError::Malformed("unknown wal opcode")),
         }
     }

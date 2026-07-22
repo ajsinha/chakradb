@@ -32,6 +32,29 @@ pub trait SqlBackend: Send + Sync {
     fn upsert(&self, table: &str, row: Row) -> Result<Csn>;
     fn update(&self, table: &str, row: Row) -> Result<Csn>;
     fn delete(&self, table: &str, key: &Value) -> Result<Csn>;
+
+    /// Apply a committed transaction's writes. A durable backend logs the whole
+    /// batch as **one** WAL record, so it is crash-atomic (all-or-nothing).
+    fn commit_batch(&self, writes: Vec<TxnWrite>) -> Result<()> {
+        for w in writes {
+            match w {
+                TxnWrite::Put(table, row) => {
+                    self.upsert(&table, row)?;
+                }
+                TxnWrite::Delete(table, key) => {
+                    let _ = self.delete(&table, &key);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A single write in a committed transaction's change-set.
+#[derive(Debug, Clone)]
+pub enum TxnWrite {
+    Put(String, Row),
+    Delete(String, Value),
 }
 
 impl SqlBackend for Database {
@@ -89,5 +112,8 @@ impl SqlBackend for Storage {
     }
     fn delete(&self, table: &str, key: &Value) -> Result<Csn> {
         Storage::delete(self, table, key)
+    }
+    fn commit_batch(&self, writes: Vec<TxnWrite>) -> Result<()> {
+        Storage::commit_transaction(self, writes).map(|_| ())
     }
 }

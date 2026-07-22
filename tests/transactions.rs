@@ -117,3 +117,103 @@ fn durable_transaction_is_crash_atomic() {
     assert!(e2.query("SELECT v FROM t WHERE id = 3").unwrap().is_empty());
     assert_eq!(one(&e2, "SELECT v FROM t WHERE id = 1"), "10");
 }
+
+#[test]
+fn torn_commit_record_is_all_or_nothing() {
+    // A committed multi-row transaction is logged as one WAL record. Truncating
+    // the log at any byte must leave the transaction either fully applied or
+    // fully absent after recovery — never a partial commit.
+    let io: Arc<MemIo> = Arc::new(MemIo::new());
+    {
+        let e = SqlEngine::durable(Arc::new(
+            Storage::open(io.clone(), StorageConfig::default()).unwrap(),
+        ));
+        e.run("CREATE TABLE t (id INT PRIMARY KEY, v INT)").unwrap();
+        e.run("INSERT INTO t VALUES (0, 0)").unwrap(); // autocommit baseline
+        e.run("BEGIN").unwrap();
+        for i in 1..=20 {
+            e.run(&format!("INSERT INTO t VALUES ({i}, {i})")).unwrap();
+        }
+        e.run("COMMIT").unwrap();
+    }
+
+    let full = {
+        let f = io.open("wal.log").unwrap();
+        let mut b = vec![0u8; f.len().unwrap() as usize];
+        f.pread(0, &mut b).unwrap();
+        b
+    };
+    let manifest = {
+        let f = io.open("MANIFEST").unwrap();
+        let mut b = vec![0u8; f.len().unwrap() as usize];
+        f.pread(0, &mut b).unwrap();
+        b
+    };
+
+    for cut in (8..full.len()).step_by(9) {
+        let io2: Arc<MemIo> = Arc::new(MemIo::new());
+        {
+            let m = io2.open("MANIFEST").unwrap();
+            m.pwrite(0, &manifest).unwrap();
+            m.sync().unwrap();
+            let w = io2.open("wal.log").unwrap();
+            w.pwrite(0, &full[..cut]).unwrap();
+            w.sync().unwrap();
+        }
+        let e = SqlEngine::durable(Arc::new(
+            Storage::open(io2, StorageConfig::default()).unwrap(),
+        ));
+        let n: i64 = e.query("SELECT COUNT(*) FROM t").unwrap()[0][0]
+            .parse()
+            .unwrap();
+        // 0 = truncated inside the baseline record; 1 = baseline only (the txn's
+        // record was torn and discarded); 21 = baseline + the whole txn. The
+        // transaction contributes 0 or all 20 rows — never a partial count.
+        assert!(
+            n == 0 || n == 1 || n == 21,
+            "cut {cut}: partial transaction recovered ({n} rows)"
+        );
+    }
+}
+
+#[test]
+fn concurrent_write_conflict_is_detected() {
+    let db = Arc::new(Database::new());
+    let a = eng(&db);
+    let b = eng(&db);
+    a.run("CREATE TABLE t (id INT PRIMARY KEY, v INT)").unwrap();
+    a.run("INSERT INTO t VALUES (1, 0)").unwrap();
+
+    // Both transactions begin at the same committed state and write the same key.
+    a.run("BEGIN").unwrap();
+    b.run("BEGIN").unwrap();
+    a.run("UPDATE t SET v = 1 WHERE id = 1").unwrap();
+    b.run("UPDATE t SET v = 2 WHERE id = 1").unwrap();
+
+    a.run("COMMIT").unwrap(); // first committer wins
+    assert!(b.run("COMMIT").is_err(), "second commit must conflict");
+    assert!(
+        !b.in_transaction(),
+        "the conflicting transaction is aborted"
+    );
+    assert_eq!(one(&a, "SELECT v FROM t WHERE id = 1"), "1");
+}
+
+#[test]
+fn non_conflicting_transactions_both_commit() {
+    let db = Arc::new(Database::new());
+    let a = eng(&db);
+    let b = eng(&db);
+    a.run("CREATE TABLE t (id INT PRIMARY KEY, v INT)").unwrap();
+    a.run("INSERT INTO t VALUES (1, 0)").unwrap();
+    a.run("INSERT INTO t VALUES (2, 0)").unwrap();
+
+    a.run("BEGIN").unwrap();
+    b.run("BEGIN").unwrap();
+    a.run("UPDATE t SET v = 1 WHERE id = 1").unwrap(); // different keys
+    b.run("UPDATE t SET v = 2 WHERE id = 2").unwrap();
+    a.run("COMMIT").unwrap();
+    b.run("COMMIT").unwrap(); // no conflict
+    assert_eq!(one(&a, "SELECT v FROM t WHERE id = 1"), "1");
+    assert_eq!(one(&a, "SELECT v FROM t WHERE id = 2"), "2");
+}
