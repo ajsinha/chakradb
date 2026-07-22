@@ -163,20 +163,23 @@ impl Value {
             // is stored as its epoch integer.
             (Value::Text(s), DataType::Date) => parse_date(s).map(Value::Int),
             (Value::Text(s), DataType::Timestamp) => parse_timestamp(s).map(Value::Int),
-            // Into DECIMAL(_, scale): integers scale up exactly; a decimal rescales
+            // Into DECIMAL(p, scale): integers scale up exactly; a decimal rescales
             // (rounding to the column scale); a float rounds to the scale; a text
-            // literal parses exactly then rescales.
-            (Value::Int(i), DataType::Decimal(_, s)) => {
-                rescale(*i as i128, 0, s as u32).map(|m| Value::Decimal(m, s as u32))
-            }
-            (Value::Decimal(m, from), DataType::Decimal(_, s)) => {
-                rescale(*m, *from, s as u32).map(|m| Value::Decimal(m, s as u32))
-            }
-            (Value::Float(f), DataType::Decimal(_, s)) => {
-                float_to_decimal(*f, s as u32).map(|m| Value::Decimal(m, s as u32))
-            }
-            (Value::Text(t), DataType::Decimal(_, s)) => parse_decimal(t)
+            // literal parses exactly then rescales. In every case the result must
+            // fit the declared precision `p` (at most `p` significant digits) — an
+            // out-of-range value is rejected, not silently truncated.
+            (Value::Int(i), DataType::Decimal(p, s)) => rescale(*i as i128, 0, s as u32)
+                .and_then(|m| fit_precision(m, p))
+                .map(|m| Value::Decimal(m, s as u32)),
+            (Value::Decimal(m, from), DataType::Decimal(p, s)) => rescale(*m, *from, s as u32)
+                .and_then(|m| fit_precision(m, p))
+                .map(|m| Value::Decimal(m, s as u32)),
+            (Value::Float(f), DataType::Decimal(p, s)) => float_to_decimal(*f, s as u32)
+                .and_then(|m| fit_precision(m, p))
+                .map(|m| Value::Decimal(m, s as u32)),
+            (Value::Text(t), DataType::Decimal(p, s)) => parse_decimal(t)
                 .and_then(|(m, from)| rescale(m, from, s as u32))
+                .and_then(|m| fit_precision(m, p))
                 .map(|m| Value::Decimal(m, s as u32)),
             // A decimal flowing into a FLOAT column becomes its (approximate) f64.
             (Value::Decimal(..), DataType::Float) => self.as_f64().map(Value::Float),
@@ -304,6 +307,14 @@ pub(crate) fn rescale(m: i128, from: u32, to: u32) -> Option<i128> {
             Some(adj / div)
         }
     }
+}
+
+/// Enforce a `DECIMAL(p, …)` precision: the mantissa must have at most `p`
+/// significant digits (`|m| < 10^p`). `None` if the value overflows the declared
+/// type — so `1000` into `DECIMAL(3,0)` is rejected, not silently stored.
+fn fit_precision(m: i128, p: u8) -> Option<i128> {
+    let limit = pow10(p as u32)?;
+    (m.abs() < limit).then_some(m)
 }
 
 /// Exact ordering between two numeric values when at least one is a `Decimal`

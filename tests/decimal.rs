@@ -77,6 +77,21 @@ fn sum_and_minmax_exact() {
 }
 
 #[test]
+fn precision_overflow_is_rejected() {
+    let e = eng();
+    e.run("CREATE TABLE t (id INT PRIMARY KEY, price DECIMAL(5,2))")
+        .unwrap();
+    // DECIMAL(5,2) holds up to 999.99 — larger magnitudes must be rejected, not
+    // silently stored with the wrong value.
+    assert!(e.run("INSERT INTO t VALUES (1, 1000.00)").is_err());
+    assert!(e.run("INSERT INTO t VALUES (2, 9999.99)").is_err());
+    e.run("INSERT INTO t VALUES (3, 999.99)").unwrap(); // the maximum fits
+    e.run("INSERT INTO t VALUES (4, -999.99)").unwrap();
+    assert_eq!(one(&e, "SELECT price FROM t WHERE id = 3"), "999.99");
+    assert_eq!(one(&e, "SELECT COUNT(*) FROM t"), "2");
+}
+
+#[test]
 fn arithmetic_is_exact() {
     let e = eng();
     e.run("CREATE TABLE t (id INT PRIMARY KEY, price DECIMAL(10,2), qty INT)")
