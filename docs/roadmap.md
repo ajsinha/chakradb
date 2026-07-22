@@ -2,7 +2,27 @@
 
 **Version:** 1.0
 **Companion to:** `requirements.md` (Architecture & Design Specification v2.0)
-**Status:** Proposed, pre-implementation
+**Status:** M0–M3 delivered; the plan below is the original sequencing and gates.
+
+> **Current state (supersedes the per-milestone status below).**
+> - **M0 (storage risk spike)** — done. Sorted-part index (~1.25 B/row), MVCC,
+>   compaction; two-phase merge fix. See `m0-findings.md`.
+> - **M1 (durability)** — done. WAL + group commit, crash recovery, checkpointing;
+>   10k crash trials. See `m1-findings.md`.
+> - **M2 (query layer)** — done and then some. SQL surface, sqllogictest + SQLancer
+>   oracles, demand-paged parts, real POSIX backend. See `m2-findings.md`.
+> - **Beyond the original plan:** storage went **Arrow-native** with **arbitrary
+>   schemas / any-type keys / keyless tables** (`arrow-schema-migration.md`);
+>   **DataFusion** is the default analytical executor behind a cost-based **HTAP
+>   router**, interpreter kept as the transactional path (`m3-datafusion-spike.md`);
+>   **durable SQL** connects the SQL front end to the WAL; ClickBench-shaped
+>   validation at 105 columns lands within ~1–2× of DuckDB with identical results.
+> - **Next:** stress the durable-SQL path at scale, re-measure the concurrency
+>   wedge on the current stack, a streaming DataFusion `TableProvider`, faster bulk
+>   ingest, and packaging toward v0.1 (no-panic public API, CI).
+>
+> The milestone plan below remains a useful record of the *reasoning and gates*;
+> the ordering held, and the "buy execution, build storage" bet paid off.
 
 > **On estimates.** Durations assume **1–2 experienced Rust engineers working consistently**.
 > They are calibration, not commitments — and they are the least reliable content in this

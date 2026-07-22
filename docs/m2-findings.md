@@ -1,5 +1,11 @@
 # M2 Findings — Query Layer & Buffer Pool
 
+> **Historical record.** Describes the M2 interpreter-only SQL layer over the
+> fixed four-column schema. Since then: DuckDB *was* installed and the comparison
+> run (`gate2-results.md`), the schema became arbitrary, and DataFusion became the
+> default executor. Read alongside `arrow-schema-migration.md` and
+> `m3-datafusion-spike.md` for the current state.
+
 **Milestone:** M2 (see `roadmap.md`)
 **Status:** Substantially complete; **Gate 2 cannot be fully evaluated in this
 environment** (no DuckDB — see §6).

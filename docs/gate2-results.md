@@ -1,5 +1,12 @@
 # Gate 2 — ChakraDB vs DuckDB
 
+> **⚠️ Superseded — historical record.** This documents the *interpreter*'s
+> cold-scan gap (14–82× behind DuckDB), which was the M2 state. That gap is
+> closed: DataFusion is now the default analytical executor, landing within ~1–3×
+> of DuckDB (and within ~1–2× on a 105-column ClickBench-shaped table with
+> identical results). See `m3-datafusion-spike.md` and `arrow-schema-migration.md`.
+> The concurrency-wedge half below is still current.
+
 **Status:** Evaluated. **Split result — read both halves.**
 **Environment:** DuckDB v1.5.4 (`/home/ashutosh/duckdb`), ChakraDB M2, same
 machine, identical 500,000-row dataset (`pk, a, b, c`), single run.
