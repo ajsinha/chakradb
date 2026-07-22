@@ -432,12 +432,22 @@ fn parse_date(s: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d))
 }
 
+/// The widest year we accept. Bounding it keeps every downstream date/time
+/// computation (`days_from_civil`, and the micros multiply in `parse_timestamp`)
+/// safely inside `i64` — so a hostile literal like `DATE '300000-01-01'` is
+/// rejected cleanly rather than overflowing (a debug panic / a release wrap to a
+/// garbage epoch). It comfortably covers the range `Arrow Timestamp` can hold.
+const MAX_YEAR: i64 = 262_143;
+
 fn parse_ymd(s: &str) -> Option<(i64, i64, i64)> {
     let mut it = s.splitn(3, '-');
     let y: i64 = it.next()?.parse().ok()?;
     let m: i64 = it.next()?.parse().ok()?;
     let d: i64 = it.next()?.parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !(-MAX_YEAR..=MAX_YEAR).contains(&y)
+        || !(1..=12).contains(&m)
+        || !(1..=31).contains(&d)
+    {
         return None;
     }
     Some((y, m, d))
@@ -455,7 +465,8 @@ fn parse_timestamp(s: &str) -> Option<i64> {
         None => 0,
         Some(t) => parse_time_micros(t)?,
     };
-    Some(days * MICROS_PER_DAY + micros_of_day)
+    // Checked, as defence in depth beyond the MAX_YEAR bound above.
+    days.checked_mul(MICROS_PER_DAY)?.checked_add(micros_of_day)
 }
 
 /// Parse `HH:MM:SS[.ffffff]` into microseconds within a day.
@@ -651,6 +662,17 @@ mod tests {
             let days = parse_date(s).unwrap();
             assert_eq!(render_date(days), s, "round trip {s}");
         }
+    }
+
+    #[test]
+    fn out_of_range_year_is_rejected_not_overflowed() {
+        // These would overflow i64 (a debug panic / a release wrap) if unbounded.
+        assert_eq!(parse_date("300000-01-01"), None);
+        assert_eq!(parse_timestamp("300000-01-01 00:00:00"), None);
+        assert_eq!(parse_date("99999999999999999-01-01"), None);
+        // The accepted range still round-trips at its edge.
+        assert!(parse_date("262143-12-31").is_some());
+        assert!(parse_date("9999-12-31").is_some());
     }
 
     #[test]

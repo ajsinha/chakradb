@@ -89,6 +89,28 @@ fn date_survives_durable_reopen() {
 }
 
 #[test]
+fn hostile_date_literal_errors_not_panics() {
+    // An out-of-range year must be rejected cleanly — never overflow (a debug
+    // panic, or a silent wrap to a garbage epoch in release).
+    let e = eng();
+    e.run("CREATE TABLE t (id INT PRIMARY KEY, d DATE, ts TIMESTAMP)")
+        .unwrap();
+    assert!(e.run("INSERT INTO t VALUES (1, '300000-01-01', NULL)").is_err());
+    assert!(e
+        .run("INSERT INTO t VALUES (2, NULL, '300000-01-01 00:00:00')")
+        .is_err());
+    // Also via a WHERE comparison literal and a typed literal.
+    e.run("INSERT INTO t VALUES (3, '2024-01-01', '2024-01-01 00:00:00')")
+        .unwrap();
+    assert!(e
+        .run("SELECT * FROM t WHERE ts > TIMESTAMP '300000-01-01 00:00:00'")
+        .is_err());
+    // A sane far-future date still works.
+    e.run("INSERT INTO t VALUES (4, '9999-12-31', NULL)").unwrap();
+    assert_eq!(one(&e, "SELECT d FROM t WHERE id = 4"), "9999-12-31");
+}
+
+#[test]
 fn date_as_primary_key() {
     let e = eng();
     e.run("CREATE TABLE t (d DATE PRIMARY KEY, v INT)").unwrap();

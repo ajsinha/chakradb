@@ -713,8 +713,9 @@ fn literal_value(e: &sa::Expr) -> Result<Value, String> {
             op: sa::UnaryOperator::Minus,
             expr,
         } => match literal_value(expr)? {
-            Value::Int(i) => Ok(Value::Int(-i)),
+            Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
             Value::Float(f) => Ok(Value::Float(-f)),
+            Value::Decimal(m, s) => Ok(Value::Decimal(m.wrapping_neg(), s)),
             _ => Err("cannot negate non-numeric literal".into()),
         },
         other => Err(format!("expected a literal, got {other:?}")),

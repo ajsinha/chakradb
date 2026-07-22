@@ -179,8 +179,11 @@ fn range_excludes(cmp: BinaryOp, mn: &Value, mx: &Value, lit: &Value) -> bool {
 fn eval_unary(op: UnaryOp, v: Value) -> Value {
     match op {
         UnaryOp::Neg => match v {
-            Value::Int(i) => Value::Int(-i),
+            // wrapping_neg matches the wrapping integer arithmetic elsewhere and
+            // avoids a debug-build panic on i64::MIN / i128::MIN.
+            Value::Int(i) => Value::Int(i.wrapping_neg()),
             Value::Float(f) => Value::Float(-f),
+            Value::Decimal(m, s) => Value::Decimal(m.wrapping_neg(), s),
             _ => Value::Null,
         },
         UnaryOp::Not => match v {
