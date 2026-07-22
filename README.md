@@ -228,10 +228,12 @@ Know these before you reach for it. ChakraDB is deliberately scoped; the wedge
 **Process model**
 - **Embedded, single process.** "Concurrent users" means threads in your
   process — there is no server or wire protocol.
-- **⚠️ No cross-process lock yet.** The design calls for a single-writer
-  directory lock, but it is **not currently enforced** — do not open the same
-  durable directory from two processes at once; it can corrupt the store. (This
-  is the top item we're closing; see roadmap.)
+- **Single-writer directory lock (enforced).** A durable directory holds an
+  advisory `LOCK` file; opening it from a second process is refused with a
+  `WouldBlock` error, so two processes can't corrupt a shared store. The lock is
+  released automatically when the process exits — including on a crash — so there
+  is no stale lock to clean up. (The in-memory `Database` and the `MemIo` test
+  backend are single-process by nature and don't take a lock.)
 
 **SQL / schema**
 - Single-column `PRIMARY KEY` only (composite keys rejected); **no secondary

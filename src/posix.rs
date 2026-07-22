@@ -23,16 +23,30 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Name of the single-writer lock file created in each database directory.
+const LOCK_FILE: &str = "LOCK";
+
 /// Filesystem-backed I/O rooted at a directory.
 #[derive(Debug)]
 pub struct PosixIo {
     root: PathBuf,
     /// Kept open so the directory can be fsynced after file creation.
     dir: Mutex<fs::File>,
+    /// Advisory exclusive lock on the directory, held via an open `LOCK` file for
+    /// the lifetime of this handle. It enforces the single-writer invariant
+    /// (design constraint C-1): a second process opening the same directory is
+    /// refused. The OS releases the lock automatically when this file is dropped
+    /// — including on process crash — so there is no stale lock to clean up.
+    _lock: fs::File,
 }
 
 impl PosixIo {
-    /// Open (creating if needed) a database directory.
+    /// Open (creating if needed) a database directory, acquiring its exclusive
+    /// single-writer lock.
+    ///
+    /// Returns an [`io::ErrorKind::WouldBlock`] error if another live process
+    /// already holds the directory — opening the same durable store twice at once
+    /// would corrupt it, so it is refused rather than allowed.
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
@@ -40,9 +54,32 @@ impl PosixIo {
         // The directory entry for `root` itself must be durable before we start
         // creating files inside it.
         dir.sync_all()?;
+
+        // Acquire the single-writer lock before touching any data files.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join(LOCK_FILE))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    ErrorKind::WouldBlock,
+                    format!(
+                        "database directory {} is already open in another process",
+                        root.display()
+                    ),
+                ));
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+
         Ok(PosixIo {
             root,
             dir: Mutex::new(dir),
+            _lock: lock,
         })
     }
 
@@ -109,6 +146,8 @@ impl Io for PosixIo {
             .flatten()
             .flatten()
             .filter_map(|e| e.file_name().into_string().ok())
+            // The single-writer lock file is internal machinery, not a data file.
+            .filter(|n| n != LOCK_FILE)
             .collect();
         out.sort();
         out
@@ -302,6 +341,20 @@ mod tests {
         for bad in ["../escape", "a/b", "..", ".", "", "sub\\file"] {
             assert!(io.open(bad).is_err(), "accepted illegal file name {bad:?}");
         }
+    }
+
+    #[test]
+    fn directory_lock_refuses_a_second_opener() {
+        let d = TempDir::new("lock").unwrap();
+        let first = PosixIo::open(d.path()).unwrap();
+        // A second handle on the same live directory is refused (single writer).
+        let err = PosixIo::open(d.path()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::WouldBlock);
+        // After the first handle is dropped, the lock is released and reopen works
+        // — including after a crash, since the OS drops the lock with the fd.
+        drop(first);
+        let reopened = PosixIo::open(d.path());
+        assert!(reopened.is_ok(), "reopen after release must succeed");
     }
 
     #[test]

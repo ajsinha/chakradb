@@ -2,7 +2,9 @@
 name = "chakradb"
 version = "0.0.0-m0"
 edition = "2021"
-rust-version = "1.85"
+# 1.89 for std file locking (File::try_lock), used by the single-writer
+# directory lock in src/posix.rs.
+rust-version = "1.89"
 description = "ChakraDB M0 prototype — risk-reduction spike for embedded transactional HTAP"
 license = "Apache-2.0"
 publish = false

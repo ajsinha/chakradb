@@ -185,8 +185,7 @@ outcome of the research, not a failure. Better to learn it now than in month nin
 Writing these down is as important as the requirements. **Not** in v1:
 
 - Distributed execution, sharding, or replication.
-- Multi-process *writers*. One writer, to be enforced by a directory lock
-  (specified but **not yet implemented** — see §2.2).
+- Multi-process *writers*. One writer, enforced by a directory lock (§2.2).
 - **Foreign keys and referential integrity.** ChakraDB holds many tables, each
   with its own primary-key space, and guarantees that a snapshot is consistent
   across all of them — so an application reading two tables observes one
@@ -237,15 +236,18 @@ pool / LRU (§7.3 explains why — parts are immutable and whole-part granular).
 - Durable commits funnel through one WAL append mutex; group commit amortizes the
   `fsync` across concurrent committers (§7.2).
 
-**Process model — the one spec/code gap**
+**Process model**
 
-- C-1 and §2.1 specify a **single-writer directory lock**. **This is not yet
-  implemented** — `trait Io` has no lock primitive and `Storage::open` does not
-  acquire one. Two processes opening the same durable directory can therefore
-  corrupt it. Closing this (an advisory `flock`-style lock at the `Io` layer,
-  released automatically on process exit) is the top hardening item for M4.
-- Reader processes (C-3) are likewise unguarded against a concurrent writer until
-  the lock lands.
+- C-1's **single-writer directory lock is enforced** for the durable path:
+  `PosixIo::open` acquires an advisory exclusive lock on a `LOCK` file (via the
+  standard-library `File::try_lock`, Rust ≥ 1.89 — no `unsafe`, no dependency).
+  A second process opening the same directory is refused with a `WouldBlock`
+  error; the lock releases automatically when the process exits, including on a
+  crash, so there is no stale lock to reap. The in-memory `Database` and the
+  `MemIo` test backend are single-process by nature and take no lock.
+- Reader-process coordination (C-3) against a live writer is still future work —
+  the current lock is writer-exclusive; shared read-only opens are not yet
+  modelled.
 
 **SQL / schema (implementation state, complementing §9)**
 
