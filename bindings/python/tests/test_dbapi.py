@@ -112,3 +112,18 @@ def test_context_manager():
         con.execute("CREATE TABLE t (id INT PRIMARY KEY)")
         con.execute("INSERT INTO t VALUES (1)")
         assert con.execute("SELECT COUNT(*) FROM t").fetchone() == (1,)
+
+
+def test_analytics_when_available():
+    # Joins/windows/subqueries need the `datafusion` feature; on the lean build
+    # the interpreter rejects them, so skip rather than fail.
+    con = chakradb.connect()
+    con.execute("CREATE TABLE a (id INT PRIMARY KEY, v INT)")
+    con.execute("CREATE TABLE b (id INT PRIMARY KEY, v INT)")
+    con.execute("INSERT INTO a VALUES (1, 10)")
+    con.execute("INSERT INTO b VALUES (1, 20)")
+    try:
+        rows = con.execute("SELECT a.v + b.v FROM a JOIN b ON a.id = b.id").fetchall()
+    except chakradb.ProgrammingError:
+        pytest.skip("joins require the datafusion feature (lean build)")
+    assert rows == [(30,)]
