@@ -102,6 +102,13 @@ impl Encoder {
             Value::Bool(b) => {
                 self.u8(4).u8(*b as u8);
             }
+            Value::Decimal(m, s) => {
+                // 128-bit mantissa as two u64 (hi, lo), then the scale.
+                self.u8(5)
+                    .u64((*m >> 64) as u64)
+                    .u64(*m as u64)
+                    .u32(*s);
+            }
         }
         self
     }
@@ -121,6 +128,9 @@ impl Encoder {
         self.u32(s.arity() as u32);
         for c in s.columns() {
             self.str(&c.name).u8(datatype_tag(c.ty));
+            if let crate::value::DataType::Decimal(p, sc) = c.ty {
+                self.u8(p).u8(sc);
+            }
             self.u8(c.nullable as u8);
             match &c.default {
                 Some(v) => {
@@ -143,8 +153,9 @@ impl Encoder {
 }
 
 /// Schema encoding version. v2 added per-column nullable + default and
-/// table-level CHECK clauses; v3 adds a per-column `VARCHAR(n)` max length.
-const SCHEMA_VERSION: u8 = 3;
+/// table-level CHECK clauses; v3 added a per-column `VARCHAR(n)` max length;
+/// v4 carries `DECIMAL(precision, scale)` parameters.
+const SCHEMA_VERSION: u8 = 4;
 
 fn datatype_tag(ty: crate::value::DataType) -> u8 {
     use crate::value::DataType::*;
@@ -155,6 +166,9 @@ fn datatype_tag(ty: crate::value::DataType) -> u8 {
         Bool => 4,
         Date => 5,
         Timestamp => 6,
+        // Decimal is written with two extra bytes (precision, scale) by the
+        // schema encoder — see `Encoder::schema`.
+        Decimal(..) => 7,
     }
 }
 
@@ -259,6 +273,12 @@ impl<'a> Decoder<'a> {
             2 => Value::Float(self.f64()?),
             3 => Value::Text(self.string()?),
             4 => Value::Bool(self.u8()? != 0),
+            5 => {
+                let hi = self.u64()? as u128;
+                let lo = self.u64()? as u128;
+                let scale = self.u32()?;
+                Value::Decimal(((hi << 64) | lo) as i128, scale)
+            }
             _ => return Err(DecodeError::Malformed("bad value tag")),
         })
     }
@@ -282,7 +302,12 @@ impl<'a> Decoder<'a> {
         let mut columns = Vec::with_capacity(n);
         for _ in 0..n {
             let name = self.string()?;
-            let ty = tag_datatype(self.u8()?).ok_or(DecodeError::Malformed("bad type tag"))?;
+            let tag = self.u8()?;
+            let ty = if tag == 7 {
+                crate::value::DataType::Decimal(self.u8()?, self.u8()?)
+            } else {
+                tag_datatype(tag).ok_or(DecodeError::Malformed("bad type tag"))?
+            };
             let nullable = self.u8()? != 0;
             let default = if self.u8()? != 0 {
                 Some(self.value()?)

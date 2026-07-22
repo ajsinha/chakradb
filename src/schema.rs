@@ -94,6 +94,9 @@ fn arrow_type(ty: DataType) -> ArrowType {
         // DataFusion) as their native temporal types, so date functions work.
         DataType::Date => ArrowType::Date32,
         DataType::Timestamp => ArrowType::Timestamp(TimeUnit::Microsecond, None),
+        // Exact fixed-point over Arrow's 128-bit decimal, so DataFusion aggregates
+        // it exactly too.
+        DataType::Decimal(p, s) => ArrowType::Decimal128(p, s as i8),
     }
 }
 

@@ -9,9 +9,9 @@
 use crate::schema::{Row, Schema};
 use crate::value::{DataType, Value};
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Float64Array,
-    Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
-    TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt32Array,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Date32Builder, Decimal128Array,
+    Decimal128Builder, Float64Array, Float64Builder, Int64Array, Int64Builder, StringArray,
+    StringBuilder, TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt32Array,
 };
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
@@ -168,6 +168,22 @@ impl Batch {
                 let a = arr.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
                 Some((Value::Int(min(a)?), Value::Int(max(a)?)))
             }
+            DataType::Decimal(_, sc) => {
+                let a = arr.as_any().downcast_ref::<Decimal128Array>()?;
+                let (mut mn, mut mx): (Option<i128>, Option<i128>) = (None, None);
+                for i in 0..a.len() {
+                    if a.is_null(i) {
+                        continue;
+                    }
+                    let v = a.value(i);
+                    mn = Some(mn.map_or(v, |m| m.min(v)));
+                    mx = Some(mx.map_or(v, |m| m.max(v)));
+                }
+                Some((
+                    Value::Decimal(mn?, sc as u32),
+                    Value::Decimal(mx?, sc as u32),
+                ))
+            }
         }
     }
 
@@ -311,6 +327,26 @@ fn build_column(ty: DataType, rows: &[Row], ci: usize) -> ArrayRef {
             }
             Arc::new(b.finish())
         }
+        // Exact decimal: values are already at the column scale (coerced on the
+        // way in); the i128 mantissa is written straight through.
+        DataType::Decimal(p, sc) => {
+            let mut b = Decimal128Builder::with_capacity(rows.len());
+            for r in rows {
+                match &r.values[ci] {
+                    Value::Decimal(m, _) => b.append_value(*m),
+                    Value::Null => b.append_null(),
+                    Value::Int(i) => {
+                        b.append_value((*i as i128) * 10i128.pow(sc as u32))
+                    }
+                    _ => b.append_null(),
+                }
+            }
+            Arc::new(
+                b.finish()
+                    .with_precision_and_scale(p, sc as i8)
+                    .expect("valid decimal precision/scale"),
+            )
+        }
     }
 }
 
@@ -357,6 +393,13 @@ fn array_value(arr: &ArrayRef, ty: DataType, i: usize) -> Value {
                 .downcast_ref::<TimestampMicrosecondArray>()
                 .expect("timestamp column")
                 .value(i),
+        ),
+        DataType::Decimal(_, sc) => Value::Decimal(
+            arr.as_any()
+                .downcast_ref::<Decimal128Array>()
+                .expect("decimal column")
+                .value(i),
+            sc as u32,
         ),
     }
 }

@@ -218,6 +218,45 @@ fn eval_arith(op: BinaryOp, l: Value, r: Value) -> Value {
             _ => unreachable!(),
         };
     }
+    // Exact decimal arithmetic: when a `Decimal` meets a `Decimal` or an `Int`,
+    // add/sub align scales and mul adds them, all in i128 — never through f64.
+    // Division and any i128 overflow fall through to the float path below.
+    if matches!(l, Value::Decimal(..)) || matches!(r, Value::Decimal(..)) {
+        let dec = |v: &Value| match v {
+            Value::Int(i) => Some((*i as i128, 0u32)),
+            Value::Decimal(m, s) => Some((*m, *s)),
+            _ => None,
+        };
+        if let (Some((am, asc)), Some((bm, bsc))) = (dec(&l), dec(&r)) {
+            let exact = match op {
+                BinaryOp::Add | BinaryOp::Sub => {
+                    let scale = asc.max(bsc);
+                    match (
+                        crate::value::rescale(am, asc, scale),
+                        crate::value::rescale(bm, bsc, scale),
+                    ) {
+                        (Some(x), Some(y)) => {
+                            let m = if op == BinaryOp::Add {
+                                x.checked_add(y)
+                            } else {
+                                x.checked_sub(y)
+                            };
+                            m.map(|m| Value::Decimal(m, scale))
+                        }
+                        _ => None,
+                    }
+                }
+                BinaryOp::Mul => am
+                    .checked_mul(bm)
+                    .map(|m| Value::Decimal(m, asc + bsc)),
+                _ => None, // Div / Mod → float path
+            };
+            if let Some(v) = exact {
+                return v;
+            }
+        }
+    }
+
     let (a, b) = match (l.as_f64(), r.as_f64()) {
         (Some(a), Some(b)) => (a, b),
         _ => return Value::Null,

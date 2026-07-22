@@ -145,6 +145,8 @@ fn value_seed(v: &crate::value::Value) -> i64 {
             }
             h as i64
         }
+        // Fold the 128-bit mantissa and scale into the seed.
+        Value::Decimal(m, s) => (*m as i64) ^ ((*m >> 64) as i64) ^ (*s as i64),
         Value::Null => 0,
     }
 }

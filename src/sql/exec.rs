@@ -749,6 +749,11 @@ struct Acc {
     /// True while every summed value has been an integer — then SUM stays an
     /// integer, matching DataFusion/DuckDB (SUM of integers is not a float).
     all_int: bool,
+    /// Exact SUM of decimals: while every summed value is a `Decimal` of one
+    /// consistent scale, SUM accumulates the i128 mantissa and stays exact.
+    dec_sum: i128,
+    dec_scale: Option<u32>,
+    all_dec: bool,
     min: Option<Value>,
     max: Option<Value>,
     seen_numeric: bool,
@@ -761,6 +766,9 @@ impl Acc {
             sum: 0.0,
             int_sum: 0,
             all_int: true,
+            dec_sum: 0,
+            dec_scale: None,
+            all_dec: true,
             min: None,
             max: None,
             seen_numeric: false,
@@ -776,9 +784,30 @@ impl Acc {
             self.seen_numeric = true;
         }
         match v {
-            Value::Int(i) => self.int_sum = self.int_sum.wrapping_add(*i),
-            Value::Bool(_) => {}
-            _ => self.all_int = false,
+            Value::Int(i) => {
+                self.int_sum = self.int_sum.wrapping_add(*i);
+                self.all_dec = false;
+            }
+            Value::Bool(_) => {
+                self.all_dec = false;
+            }
+            Value::Decimal(m, s) => {
+                self.all_int = false;
+                match self.dec_scale {
+                    None => {
+                        self.dec_scale = Some(*s);
+                        self.dec_sum = *m;
+                    }
+                    Some(scale) if scale == *s => self.dec_sum = self.dec_sum.wrapping_add(*m),
+                    // Mixed scales — give up on the exact path, keep the f64 sum.
+                    Some(_) => self.all_dec = false,
+                }
+            }
+            // Float / Text: not exactly summable as int or decimal.
+            _ => {
+                self.all_int = false;
+                self.all_dec = false;
+            }
         }
         if self
             .min
@@ -805,6 +834,9 @@ impl Acc {
                     Value::Null
                 } else if self.all_int {
                     Value::Int(self.int_sum)
+                } else if self.all_dec {
+                    // Exact decimal sum at the shared scale.
+                    Value::Decimal(self.dec_sum, self.dec_scale.unwrap_or(0))
                 } else {
                     Value::Float(self.sum)
                 }

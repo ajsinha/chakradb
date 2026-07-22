@@ -29,6 +29,10 @@ pub enum DataType {
     /// A timestamp, physically an `Int` of microseconds since the Unix epoch
     /// (Arrow `Timestamp(Microsecond)`). Logical type over `Value::Int`.
     Timestamp,
+    /// Exact fixed-point number `DECIMAL(precision, scale)` — `precision` total
+    /// significant digits, `scale` digits after the point. Stored as an `i128`
+    /// unscaled mantissa (Arrow `Decimal128`), never as `f64`, so money is exact.
+    Decimal(u8, u8),
 }
 
 impl DataType {
@@ -40,6 +44,15 @@ impl DataType {
             DataType::Bool => "BOOLEAN",
             DataType::Date => "DATE",
             DataType::Timestamp => "TIMESTAMP",
+            DataType::Decimal(..) => "DECIMAL",
+        }
+    }
+
+    /// The `(precision, scale)` of a `DECIMAL`, or `None` for other types.
+    pub fn decimal_params(self) -> Option<(u8, u8)> {
+        match self {
+            DataType::Decimal(p, s) => Some((p, s)),
+            _ => None,
         }
     }
 
@@ -48,7 +61,7 @@ impl DataType {
     pub fn type_char(self) -> char {
         match self {
             DataType::Int | DataType::Bool => 'I',
-            DataType::Float => 'R',
+            DataType::Float | DataType::Decimal(..) => 'R',
             DataType::Text | DataType::Date | DataType::Timestamp => 'T',
         }
     }
@@ -59,7 +72,10 @@ impl DataType {
         let head = name.split(['(', ' ']).next().unwrap_or(name);
         match head.to_ascii_lowercase().as_str() {
             "int" | "integer" | "bigint" | "smallint" | "tinyint" => Some(DataType::Int),
-            "float" | "double" | "real" | "decimal" | "numeric" => Some(DataType::Float),
+            "float" | "double" | "real" => Some(DataType::Float),
+            // A bare DECIMAL/NUMERIC defaults to scale 0; the DDL layer supplies
+            // the real precision/scale from `DECIMAL(p, s)`.
+            "decimal" | "numeric" | "dec" => Some(DataType::Decimal(38, 0)),
             "text" | "varchar" | "char" | "string" => Some(DataType::Text),
             "bool" | "boolean" => Some(DataType::Bool),
             "date" => Some(DataType::Date),
@@ -79,6 +95,9 @@ pub enum Value {
     Float(f64),
     Text(String),
     Bool(bool),
+    /// Exact fixed-point: `(mantissa, scale)` — the number is `mantissa / 10^scale`
+    /// (e.g. `12.34` is `Decimal(1234, 2)`). Backs `DECIMAL(p, s)` columns.
+    Decimal(i128, u32),
 }
 
 impl Value {
@@ -103,6 +122,7 @@ impl Value {
             Value::Int(i) => Some(*i as f64),
             Value::Float(f) => Some(*f),
             Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Value::Decimal(m, s) => Some(*m as f64 / 10f64.powi(*s as i32)),
             _ => None,
         }
     }
@@ -126,6 +146,10 @@ impl Value {
             (Value::Bool(_), DataType::Bool) => true,
             // Date/Timestamp are physically Int (epoch days / micros).
             (Value::Int(_), DataType::Date | DataType::Timestamp) => true,
+            // A decimal fits a decimal column of the *same* scale (coerce handles
+            // rescaling); an integer widens into any decimal.
+            (Value::Decimal(_, s), DataType::Decimal(_, ds)) => *s == ds as u32,
+            (Value::Int(_), DataType::Decimal(..)) => true,
             _ => false,
         }
     }
@@ -139,6 +163,23 @@ impl Value {
             // is stored as its epoch integer.
             (Value::Text(s), DataType::Date) => parse_date(s).map(Value::Int),
             (Value::Text(s), DataType::Timestamp) => parse_timestamp(s).map(Value::Int),
+            // Into DECIMAL(_, scale): integers scale up exactly; a decimal rescales
+            // (rounding to the column scale); a float rounds to the scale; a text
+            // literal parses exactly then rescales.
+            (Value::Int(i), DataType::Decimal(_, s)) => {
+                rescale(*i as i128, 0, s as u32).map(|m| Value::Decimal(m, s as u32))
+            }
+            (Value::Decimal(m, from), DataType::Decimal(_, s)) => {
+                rescale(*m, *from, s as u32).map(|m| Value::Decimal(m, s as u32))
+            }
+            (Value::Float(f), DataType::Decimal(_, s)) => {
+                float_to_decimal(*f, s as u32).map(|m| Value::Decimal(m, s as u32))
+            }
+            (Value::Text(t), DataType::Decimal(_, s)) => parse_decimal(t)
+                .and_then(|(m, from)| rescale(m, from, s as u32))
+                .map(|m| Value::Decimal(m, s as u32)),
+            // A decimal flowing into a FLOAT column becomes its (approximate) f64.
+            (Value::Decimal(..), DataType::Float) => self.as_f64().map(Value::Float),
             (v, t) if v.fits(t) => Some(self),
             _ => None,
         }
@@ -159,7 +200,7 @@ impl Value {
     pub fn type_char(&self) -> char {
         match self {
             Value::Int(_) | Value::Bool(_) => 'I',
-            Value::Float(_) => 'R',
+            Value::Float(_) | Value::Decimal(..) => 'R',
             Value::Text(_) => 'T',
             Value::Null => '?',
         }
@@ -180,6 +221,7 @@ impl Value {
                 }
             }
             Value::Text(s) => s.clone(),
+            Value::Decimal(m, s) => render_decimal(*m, *s),
         }
     }
 
@@ -188,7 +230,12 @@ impl Value {
         match (self, other) {
             (Value::Null, _) | (_, Value::Null) => None,
             (Value::Text(a), Value::Text(b)) => Some(a.cmp(b)),
-            _ => self.as_f64()?.partial_cmp(&other.as_f64()?),
+            _ => {
+                if let Some(o) = cmp_decimal_exact(self, other) {
+                    return Some(o);
+                }
+                self.as_f64()?.partial_cmp(&other.as_f64()?)
+            }
         }
     }
 
@@ -200,7 +247,7 @@ impl Value {
             match v {
                 Value::Null => 0,
                 Value::Bool(_) => 1,
-                Value::Int(_) | Value::Float(_) => 2,
+                Value::Int(_) | Value::Float(_) | Value::Decimal(..) => 2,
                 Value::Text(_) => 3,
             }
         }
@@ -211,6 +258,10 @@ impl Value {
             // Compare two integers exactly. Routing through f64 (below) would
             // conflate integers beyond 2^53 — fatal for an integer key column.
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            // Exact decimal ordering (also vs integers) — no f64 rounding.
+            _ if cmp_decimal_exact(self, other).is_some() => {
+                cmp_decimal_exact(self, other).unwrap()
+            }
             _ => match (self.as_f64(), other.as_f64()) {
                 (Some(a), Some(b)) => a.total_cmp(&b),
                 _ => rank(self).cmp(&rank(other)),
@@ -224,6 +275,121 @@ impl Value {
             Value::Text(s) => s.capacity(),
             _ => 0,
         }
+    }
+}
+
+// --- Exact DECIMAL: i128 mantissa + scale ----------------------------------
+
+/// Largest `scale` we support (an `i128` holds 38 decimal digits).
+const MAX_DECIMAL_SCALE: u32 = 38;
+
+/// `10^n` as `i128`, or `None` on overflow.
+fn pow10(n: u32) -> Option<i128> {
+    if n > MAX_DECIMAL_SCALE {
+        return None;
+    }
+    10i128.checked_pow(n)
+}
+
+/// Rescale mantissa `m` from `from` to `to` decimal places. Increasing scale is
+/// exact; decreasing rounds half-away-from-zero (SQL's `CAST` rounding).
+pub(crate) fn rescale(m: i128, from: u32, to: u32) -> Option<i128> {
+    match to.cmp(&from) {
+        Ordering::Equal => Some(m),
+        Ordering::Greater => m.checked_mul(pow10(to - from)?),
+        Ordering::Less => {
+            let div = pow10(from - to)?;
+            let half = div / 2;
+            let adj = if m >= 0 { m + half } else { m - half };
+            Some(adj / div)
+        }
+    }
+}
+
+/// Exact ordering between two numeric values when at least one is a `Decimal`
+/// (the other may be `Int` or `Decimal`). `None` if either side is neither.
+fn cmp_decimal_exact(a: &Value, b: &Value) -> Option<Ordering> {
+    if !matches!(a, Value::Decimal(..)) && !matches!(b, Value::Decimal(..)) {
+        return None;
+    }
+    let as_dec = |v: &Value| -> Option<(i128, u32)> {
+        match v {
+            Value::Decimal(m, s) => Some((*m, *s)),
+            Value::Int(i) => Some((*i as i128, 0)),
+            _ => None,
+        }
+    };
+    let (am, asc) = as_dec(a)?;
+    let (bm, bsc) = as_dec(b)?;
+    let scale = asc.max(bsc);
+    // Align both to the common scale; fall back to f64 if the shift overflows.
+    match (rescale(am, asc, scale), rescale(bm, bsc, scale)) {
+        (Some(x), Some(y)) => Some(x.cmp(&y)),
+        _ => a.as_f64()?.partial_cmp(&b.as_f64()?),
+    }
+}
+
+/// Parse a plain decimal string (`-12.34`, `42`, `.5`) into `(mantissa, scale)`.
+/// Rejects exponents and other float syntax — callers fall back to `f64` there.
+fn parse_decimal(s: &str) -> Option<(i128, u32)> {
+    let s = s.trim();
+    if s.is_empty() || s.contains(['e', 'E']) {
+        return None;
+    }
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (int_part, frac_part) = match body.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (body, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let scale = frac_part.len() as u32;
+    if scale > MAX_DECIMAL_SCALE {
+        return None;
+    }
+    let digits = format!("{int_part}{frac_part}");
+    let digits = if digits.is_empty() { "0" } else { &digits };
+    let mut m: i128 = digits.parse().ok()?;
+    if neg {
+        m = -m;
+    }
+    Some((m, scale))
+}
+
+/// Round a float to a decimal of the given scale (lossy — only for `f64` inputs).
+fn float_to_decimal(f: f64, scale: u32) -> Option<i128> {
+    if !f.is_finite() {
+        return None;
+    }
+    let scaled = f * 10f64.powi(scale as i32);
+    if scaled.abs() >= i128::MAX as f64 {
+        return None;
+    }
+    Some(scaled.round() as i128)
+}
+
+/// Format a decimal mantissa/scale as its exact string (`1234`, `2` → `12.34`).
+fn render_decimal(m: i128, scale: u32) -> String {
+    if scale == 0 {
+        return m.to_string();
+    }
+    let neg = m < 0;
+    let digits = m.unsigned_abs().to_string();
+    let scale = scale as usize;
+    let s = if digits.len() > scale {
+        let point = digits.len() - scale;
+        format!("{}.{}", &digits[..point], &digits[point..])
+    } else {
+        format!("0.{:0>width$}", digits, width = scale)
+    };
+    if neg {
+        format!("-{s}")
+    } else {
+        s
     }
 }
 
@@ -388,6 +554,10 @@ mod tests {
         assert_eq!(DataType::parse("Double"), Some(DataType::Float));
         assert_eq!(DataType::parse("VARCHAR"), Some(DataType::Text));
         assert_eq!(DataType::parse("boolean"), Some(DataType::Bool));
+        assert_eq!(DataType::parse("date"), Some(DataType::Date));
+        // A bare DECIMAL defaults to scale 0; DDL supplies real precision/scale.
+        assert_eq!(DataType::parse("decimal"), Some(DataType::Decimal(38, 0)));
+        assert_eq!(DataType::parse("numeric"), Some(DataType::Decimal(38, 0)));
         assert_eq!(DataType::parse("blob"), None);
     }
 
@@ -502,6 +672,67 @@ mod tests {
     fn timestamp_fraction_round_trips() {
         let m = parse_timestamp("2024-01-15 00:00:00.123456").unwrap();
         assert_eq!(render_timestamp(m), "2024-01-15 00:00:00.123456");
+    }
+
+    // --- Exact decimal ----------------------------------------------------
+
+    #[test]
+    fn decimal_parse_and_render() {
+        assert_eq!(parse_decimal("12.34"), Some((1234, 2)));
+        assert_eq!(parse_decimal("-0.01"), Some((-1, 2)));
+        assert_eq!(parse_decimal("42"), Some((42, 0)));
+        assert_eq!(parse_decimal(".5"), Some((5, 1)));
+        assert_eq!(parse_decimal("1e5"), None); // exponents rejected
+        for (m, s, out) in [
+            (1234i128, 2u32, "12.34"),
+            (-1, 2, "-0.01"),
+            (5, 0, "5"),
+            (5, 3, "0.005"),
+            (1000, 2, "10.00"),
+        ] {
+            assert_eq!(render_decimal(m, s), out, "render {m}/{s}");
+        }
+    }
+
+    #[test]
+    fn decimal_rescale_rounds_half_away() {
+        assert_eq!(rescale(5, 0, 2), Some(500)); // 5 -> 5.00
+        assert_eq!(rescale(1234, 2, 1), Some(123)); // 12.34 -> 12.3
+        assert_eq!(rescale(1235, 2, 1), Some(124)); // 12.35 -> 12.4 (half up)
+        assert_eq!(rescale(-1235, 2, 1), Some(-124)); // -12.35 -> -12.4
+    }
+
+    #[test]
+    fn decimal_compares_exactly() {
+        let a = Value::Decimal(1000, 2); // 10.00
+        let b = Value::Decimal(100, 1); // 10.0
+        assert_eq!(a.total_cmp(&b), Ordering::Equal);
+        assert_eq!(a.sql_cmp(&b), Some(Ordering::Equal));
+        assert_eq!(a.total_cmp(&Value::Int(10)), Ordering::Equal);
+        assert_eq!(
+            Value::Decimal(1001, 2).total_cmp(&Value::Int(10)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn decimal_coercion() {
+        // Text -> Decimal at a target scale (rescales exactly).
+        assert_eq!(
+            Value::Text("9.9".into()).coerce(DataType::Decimal(10, 2)),
+            Some(Value::Decimal(990, 2))
+        );
+        // Int widens exactly.
+        assert_eq!(
+            Value::Int(5).coerce(DataType::Decimal(10, 2)),
+            Some(Value::Decimal(500, 2))
+        );
+        // Decimal -> Float is the (approximate) f64.
+        assert_eq!(
+            Value::Decimal(1234, 2).coerce(DataType::Float),
+            Some(Value::Float(12.34))
+        );
+        assert_eq!(Value::Decimal(1234, 2).render(), "12.34");
     }
 
     #[test]

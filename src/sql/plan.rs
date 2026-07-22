@@ -170,7 +170,8 @@ fn schema_from_ddl(ct: &sa::CreateTable) -> Result<Schema, String> {
     let mut checks: Vec<String> = Vec::new();
     for (i, col) in ct.columns.iter().enumerate() {
         let name = col.name.value.clone();
-        let ty = DataType::parse(&col.data_type.to_string())
+        let ty = decimal_type(&col.data_type)
+            .or_else(|| DataType::parse(&col.data_type.to_string()))
             .ok_or_else(|| format!("unsupported column type for {name}: {}", col.data_type))?;
         let mut def = ColumnDef::new(name.clone(), ty);
         def.max_len = text_max_len(&col.data_type);
@@ -185,10 +186,8 @@ fn schema_from_ddl(ct: &sa::CreateTable) -> Result<Schema, String> {
                 sa::ColumnOption::NotNull => def.nullable = false,
                 sa::ColumnOption::Null => def.nullable = true,
                 sa::ColumnOption::Default(e) => {
-                    let v = literal_value(e)
-                        .map_err(|_| format!("DEFAULT for {name} must be a literal"))?
-                        .coerce(ty)
-                        .ok_or_else(|| format!("DEFAULT for {name} does not fit its type"))?;
+                    let v = literal_for_column(e, ty, &name)
+                        .map_err(|_| format!("DEFAULT for {name} is not a valid literal"))?;
                     def.default = Some(v);
                 }
                 sa::ColumnOption::Check(c) => checks.push(c.expr.to_string()),
@@ -269,6 +268,64 @@ pub(crate) fn enforce_constraints(
     Ok(())
 }
 
+/// Resolve a literal for a target column. For a `DECIMAL` column the numeric
+/// literal is parsed **exactly from its text** (never via `f64`), so `9.99`
+/// stores as `999`/scale-2, not the nearest double. Everything else goes through
+/// the normal literal path plus type coercion.
+fn literal_for_column(e: &sa::Expr, ty: DataType, col: &str) -> Result<Value, String> {
+    if matches!(ty, DataType::Decimal(..)) {
+        if let Some(s) = number_literal_string(e) {
+            return Value::Text(s)
+                .coerce(ty)
+                .ok_or_else(|| format!("invalid DECIMAL literal for column {col}"));
+        }
+    }
+    literal_value(e)?
+        .coerce(ty)
+        .ok_or_else(|| format!("value does not fit column {col}"))
+}
+
+/// The original source text of a numeric literal (with a leading `-` for a
+/// negated one), or `None` if `e` is not a plain number.
+fn number_literal_string(e: &sa::Expr) -> Option<String> {
+    match e {
+        sa::Expr::Value(v) => match &v.value {
+            sa::Value::Number(n, _) => Some(n.clone()),
+            _ => None,
+        },
+        sa::Expr::UnaryOp {
+            op: sa::UnaryOperator::Minus,
+            expr,
+        } => number_literal_string(expr).map(|s| format!("-{s}")),
+        _ => None,
+    }
+}
+
+/// A `DECIMAL(p, s)` / `NUMERIC(p, s)` type from the AST, with its precision and
+/// scale. Bare `DECIMAL` defaults to scale 0; precision defaults to the 38-digit
+/// `i128` maximum.
+fn decimal_type(dt: &sa::DataType) -> Option<DataType> {
+    use sa::DataType as D;
+    let info = match dt {
+        D::Numeric(i)
+        | D::Decimal(i)
+        | D::DecimalUnsigned(i)
+        | D::BigNumeric(i)
+        | D::BigDecimal(i)
+        | D::Dec(i)
+        | D::DecUnsigned(i) => i,
+        _ => return None,
+    };
+    let (p, s) = match info {
+        sa::ExactNumberInfo::None => (38u64, 0i64),
+        sa::ExactNumberInfo::Precision(p) => (*p, 0),
+        sa::ExactNumberInfo::PrecisionAndScale(p, s) => (*p, *s),
+    };
+    let p = p.clamp(1, 38) as u8;
+    let s = s.clamp(0, p as i64) as u8;
+    Some(DataType::Decimal(p, s))
+}
+
 /// The declared character length of a `CHAR(n)`/`VARCHAR(n)` type, if any.
 fn text_max_len(dt: &sa::DataType) -> Option<u32> {
     use sa::DataType as D;
@@ -335,10 +392,8 @@ fn plan_insert(ins: sa::Insert, schema_for: SchemaFor) -> Result<Plan, String> {
         let mut fields = vec![Value::Null; schema.arity()];
         let mut provided = vec![false; schema.arity()];
         for (&slot, e) in col_order.iter().zip(tuple.content) {
-            let ty = schema.column(slot).ty;
-            fields[slot] = literal_value(&e)?
-                .coerce(ty)
-                .ok_or_else(|| format!("value does not fit column {}", schema.column(slot).name))?;
+            let c = schema.column(slot);
+            fields[slot] = literal_for_column(&e, c.ty, &c.name)?;
             provided[slot] = true;
         }
         // Columns the INSERT omitted take their DEFAULT (an explicit NULL is

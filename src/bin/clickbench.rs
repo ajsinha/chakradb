@@ -149,6 +149,7 @@ fn parse_field(s: &str, ty: DataType) -> Value {
         DataType::Float => s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null),
         DataType::Text => Value::Text(s.to_string()),
         DataType::Bool => Value::Bool(s == "1" || s.eq_ignore_ascii_case("true")),
+        DataType::Decimal(..) => Value::Text(s.to_string()).coerce(ty).unwrap_or(Value::Null),
     }
 }
 
