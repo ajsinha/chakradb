@@ -1,0 +1,21 @@
+[package]
+name = "chakradb-python"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Python DB-API 2.0 driver for ChakraDB"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+# Lean by default (interpreter SQL) so the driver builds fast; the `datafusion`
+# feature turns on the vectorised analytical engine.
+chakradb = { path = "../..", default-features = false }
+
+[features]
+datafusion = ["chakradb/datafusion"]

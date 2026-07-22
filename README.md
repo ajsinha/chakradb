@@ -107,6 +107,18 @@ let db = SqlEngine::durable(Arc::new(Storage::open(io, StorageConfig::default())
 assert_eq!(db.query("SELECT age FROM users WHERE email = 'bob@x.com'")?[0][0], "41");
 ```
 
+From **Python**, via a standard DB-API 2.0 (PEP 249) driver — works like
+`sqlite3` (`bindings/python/`):
+
+```python
+import chakradb
+con = chakradb.connect("./mydb")             # a directory; ":memory:" for ephemeral
+cur = con.cursor()
+cur.execute("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+cur.execute("INSERT INTO t VALUES (?, ?)", (1, "alice"))
+print(cur.execute("SELECT name FROM t WHERE id = ?", (1,)).fetchone())   # ('alice',)
+```
+
 Or in-memory, straight to the storage API:
 
 ```rust
@@ -139,9 +151,10 @@ few), with **identical results**. (`cargo run --release --features datafusion
 --bin clickbench`; DuckDB half in `scripts/clickbench_duckdb.sh`.)
 
 **Durability.** 10,000 randomized crash trials verify every acknowledged write
-survives, in all durability modes. Durable SQL (WAL-logged) recovers arbitrary
-schemas — text keys, keyless rowid tables — across a reopen. (`crash_consistency`,
-`durable_sql`.)
+survives, in all durability modes. Durable SQL adds **30,000 more crash trials
+(~4.3M acknowledged writes verified)** across int, text, and keyless-rowid
+schemas — every acked write recovered exactly. (`crash_consistency`,
+`durable_sql_crash`.)
 
 **Index cost.** ~1.25 B/row, flat with table size — the sorted key column *is* the
 index, so no per-row key→location map exists. (`m0-bench`.)
@@ -179,7 +192,8 @@ docs/
   m3-datafusion-spike.md       Adopting DataFusion behind the scan boundary
   m0/m1/m2-findings.md          Point-in-time milestone records (historical)
 src/                           Engine: storage, MVCC, WAL, SQL, DataFusion bridge
-tests/                         19 integration suites + SQLancer/sqllogictest oracles
+bindings/python/               DB-API 2.0 (PEP 249) driver — works like sqlite3
+tests/                         20 integration suites + SQLancer/sqllogictest oracles
 scripts/                       qa.sh + DuckDB comparison drivers
 ```
 
