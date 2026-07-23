@@ -140,6 +140,10 @@ pub struct GraphView {
     offsets: Vec<u32>,
     /// CSR out-neighbours (dense indices), grouped by source.
     adj: Vec<u32>,
+    /// Reverse CSR: offsets and in-neighbours grouped by destination. Needed for
+    /// backward traversal, fan-in detection, and strongly-connected components.
+    in_offsets: Vec<u32>,
+    in_adj: Vec<u32>,
 }
 
 impl GraphView {
@@ -167,11 +171,30 @@ impl GraphView {
             adj[cursor[si] as usize] = index[&d];
             cursor[si] += 1;
         }
+
+        // Reverse CSR (grouped by destination) — the same counting sort on `dst`.
+        let mut in_offsets = vec![0u32; n + 1];
+        for &(_, d) in &pairs {
+            in_offsets[index[&d] as usize + 1] += 1;
+        }
+        for i in 0..n {
+            in_offsets[i + 1] += in_offsets[i];
+        }
+        let mut in_adj = vec![0u32; pairs.len()];
+        let mut in_cursor = in_offsets.clone();
+        for &(s, d) in &pairs {
+            let di = index[&d] as usize;
+            in_adj[in_cursor[di] as usize] = index[&s];
+            in_cursor[di] += 1;
+        }
+
         GraphView {
             ids,
             index,
             offsets,
             adj,
+            in_offsets,
+            in_adj,
         }
     }
 
@@ -193,6 +216,34 @@ impl GraphView {
     /// Out-degree of `node` (0 if the node is unknown or a pure sink).
     pub fn out_degree(&self, node: NodeId) -> usize {
         self.index.get(&node).map_or(0, |&i| self.neighbors(i).len())
+    }
+
+    #[inline]
+    fn in_neighbors_dense(&self, dense: u32) -> &[u32] {
+        let (a, b) = (
+            self.in_offsets[dense as usize],
+            self.in_offsets[dense as usize + 1],
+        );
+        &self.in_adj[a as usize..b as usize]
+    }
+
+    /// In-degree of `node` — the number of edges pointing *at* it. In an
+    /// AML entity/flow graph this is the **fan-in**: a high in-degree with many
+    /// small incoming transfers is the signature of structuring / smurfing.
+    pub fn in_degree(&self, node: NodeId) -> usize {
+        self.index
+            .get(&node)
+            .map_or(0, |&i| self.in_neighbors_dense(i).len())
+    }
+
+    /// The direct in-neighbours of `node` (sources of edges into it).
+    pub fn in_neighbors(&self, node: NodeId) -> Vec<NodeId> {
+        self.index.get(&node).map_or_else(Vec::new, |&i| {
+            self.in_neighbors_dense(i)
+                .iter()
+                .map(|&d| self.ids[d as usize])
+                .collect()
+        })
     }
 
     /// Breadth-first shortest-hop distances from `start`, following out-edges.
@@ -340,6 +391,119 @@ impl GraphView {
             }
         }
         total
+    }
+
+    /// Strongly-connected components (Kosaraju): maximal sets of nodes each
+    /// reachable from every other. Directed **cycles** — money that can return to
+    /// its origin through a chain of transfers — are exactly the SCCs of size > 1
+    /// (or a self-loop). This is the core of round-tripping / layering detection.
+    pub fn strongly_connected_components(&self) -> Vec<Vec<NodeId>> {
+        let n = self.node_count();
+        // Pass 1 — iterative post-order DFS on forward edges to get a finish order.
+        let mut visited = vec![false; n];
+        let mut order = Vec::with_capacity(n);
+        for s in 0..n as u32 {
+            if visited[s as usize] {
+                continue;
+            }
+            visited[s as usize] = true;
+            let mut stack = vec![(s, 0usize)];
+            while let Some(&mut (u, ref mut i)) = stack.last_mut() {
+                let nbrs = self.neighbors(u);
+                if *i < nbrs.len() {
+                    let v = nbrs[*i];
+                    *i += 1;
+                    if !visited[v as usize] {
+                        visited[v as usize] = true;
+                        stack.push((v, 0));
+                    }
+                } else {
+                    order.push(u);
+                    stack.pop();
+                }
+            }
+        }
+        // Pass 2 — DFS on reverse edges in reverse finish order; each tree is an SCC.
+        let mut comp = vec![u32::MAX; n];
+        let mut sccs = Vec::new();
+        for &s in order.iter().rev() {
+            if comp[s as usize] != u32::MAX {
+                continue;
+            }
+            let id = sccs.len() as u32;
+            let mut members = Vec::new();
+            let mut stack = vec![s];
+            comp[s as usize] = id;
+            while let Some(u) = stack.pop() {
+                members.push(self.ids[u as usize]);
+                for &v in self.in_neighbors_dense(u) {
+                    if comp[v as usize] == u32::MAX {
+                        comp[v as usize] = id;
+                        stack.push(v);
+                    }
+                }
+            }
+            sccs.push(members);
+        }
+        sccs
+    }
+
+    /// The **laundering cycles**: strongly-connected components of size ≥ 2 — sets
+    /// of accounts among which funds can circulate back to any starting point.
+    /// A non-empty result is direct evidence of round-tripping / layering.
+    pub fn laundering_cycles(&self) -> Vec<Vec<NodeId>> {
+        self.strongly_connected_components()
+            .into_iter()
+            .filter(|c| c.len() >= 2)
+            .collect()
+    }
+
+    /// **Personalized PageRank** — PageRank whose teleport mass concentrates on a
+    /// `seeds` set instead of spreading uniformly. Seeded with known-bad accounts,
+    /// it propagates *risk* through the transaction graph: an account's score is
+    /// its proximity/exposure to the seeds. Returns `node -> score`.
+    pub fn personalized_pagerank(
+        &self,
+        seeds: &[NodeId],
+        iterations: usize,
+        damping: f64,
+    ) -> HashMap<NodeId, f64> {
+        let n = self.node_count();
+        let seed_idx: Vec<usize> = seeds
+            .iter()
+            .filter_map(|s| self.index.get(s).map(|&i| i as usize))
+            .collect();
+        if n == 0 || seed_idx.is_empty() {
+            return HashMap::new();
+        }
+        let mut teleport = vec![0.0f64; n];
+        let share = 1.0 / seed_idx.len() as f64;
+        for &i in &seed_idx {
+            teleport[i] = share;
+        }
+        let mut rank = teleport.clone();
+        for _ in 0..iterations {
+            // Dangling mass (nodes with no out-edge) teleports back to the seeds.
+            let dangling: f64 = (0..n)
+                .filter(|&u| self.neighbors(u as u32).is_empty())
+                .map(|u| rank[u])
+                .sum();
+            let mut next = vec![0.0f64; n];
+            for (u, &t) in teleport.iter().enumerate() {
+                next[u] = (1.0 - damping) * t + damping * dangling * t;
+            }
+            for (u, &rank_u) in rank.iter().enumerate() {
+                let out = self.neighbors(u as u32);
+                if !out.is_empty() {
+                    let contrib = damping * rank_u / out.len() as f64;
+                    for &v in out {
+                        next[v as usize] += contrib;
+                    }
+                }
+            }
+            rank = next;
+        }
+        self.ids.iter().copied().zip(rank).collect()
     }
 }
 

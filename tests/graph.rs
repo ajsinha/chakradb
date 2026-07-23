@@ -94,6 +94,55 @@ fn triangle_count() {
 }
 
 #[test]
+fn in_degree_and_in_neighbors() {
+    // A fan-in hub: 2,3,4 all send to 1.
+    let g = graph();
+    g.add_edges([(2, 1, 1.0), (3, 1, 1.0), (4, 1, 1.0), (1, 5, 1.0)])
+        .unwrap();
+    let v = g.view().unwrap();
+    assert_eq!(v.in_degree(1), 3); // fan-in of 3
+    assert_eq!(v.out_degree(1), 1);
+    let mut ins = v.in_neighbors(1);
+    ins.sort_unstable();
+    assert_eq!(ins, vec![2, 3, 4]);
+    assert_eq!(v.in_degree(2), 0);
+}
+
+#[test]
+fn strongly_connected_components_find_a_laundering_cycle() {
+    // A round-trip 1 -> 2 -> 3 -> 1 (a cycle), plus a dangling sink 3 -> 4.
+    let g = graph();
+    g.add_edges([(1, 2, 1.0), (2, 3, 1.0), (3, 1, 1.0), (3, 4, 1.0)])
+        .unwrap();
+    let cycles = g.view().unwrap().laundering_cycles();
+    assert_eq!(cycles.len(), 1, "one non-trivial SCC");
+    let mut ring = cycles[0].clone();
+    ring.sort_unstable();
+    assert_eq!(ring, vec![1, 2, 3], "the cycle members");
+}
+
+#[test]
+fn no_cycle_in_a_dag() {
+    let g = graph();
+    g.add_edges([(1, 2, 1.0), (2, 3, 1.0), (1, 3, 1.0)]).unwrap();
+    assert!(g.view().unwrap().laundering_cycles().is_empty());
+}
+
+#[test]
+fn personalized_pagerank_scores_by_proximity_to_seeds() {
+    // A chain 1 -> 2 -> 3 -> 4; seed the risk at node 1.
+    let g = graph();
+    g.add_edges([(1, 2, 1.0), (2, 3, 1.0), (3, 4, 1.0)]).unwrap();
+    let ppr = g.view().unwrap().personalized_pagerank(&[1], 40, 0.85);
+    // Risk decays with distance from the seed: 1 > 2 > 3 > 4.
+    assert!(ppr[&1] > ppr[&2]);
+    assert!(ppr[&2] > ppr[&3]);
+    assert!(ppr[&3] > ppr[&4]);
+    // An unrelated seed set that isn't present yields nothing.
+    assert!(g.view().unwrap().personalized_pagerank(&[999], 10, 0.85).is_empty());
+}
+
+#[test]
 fn view_is_a_consistent_snapshot_under_writes() {
     // The wedge, for graphs: an algorithm's view is stable while the graph grows.
     let g = sample();
