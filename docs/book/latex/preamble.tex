@@ -9,10 +9,16 @@
 \usepackage{sectsty}
 \usepackage[most]{tcolorbox}
 
-\definecolor{chakra}{HTML}{B5651D}
-\definecolor{chakradark}{HTML}{7A3E12}
-\chapterfont{\color{chakra}}
-\sectionfont{\color{chakradark}}
+% Theme: Harvard Crimson with saffron / yellow / white accents.
+\definecolor{crimson}{HTML}{A51C30}    % Harvard crimson (cover + headings)
+\definecolor{crimsondark}{HTML}{7B1420} % deeper crimson for subheadings
+\definecolor{saffron}{HTML}{F4C430}    % saffron / marigold accent
+\definecolor{saffrondeep}{HTML}{E8A317}% deeper saffron
+\definecolor{goldyellow}{HTML}{FFD24A} % bright yellow highlight
+\colorlet{chakra}{crimson}             % back-compat alias used elsewhere
+\chapterfont{\color{crimson}}
+\subsectionfont{\color{crimsondark}}
+\sectionfont{\color{crimsondark}}
 
 \pagestyle{fancy}
 \fancyhf{}
