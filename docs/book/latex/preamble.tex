@@ -35,6 +35,21 @@
   \setmonofont{DejaVu Sans Mono}[Scale=0.82]
 \fi
 
+% Render math symbols that appear in prose as proper LaTeX math (the body font
+% lacks them). Code blocks are verbatim, so their glyphs come from the mono font
+% (DejaVu Sans Mono) and are unaffected by these mappings.
+\ifXeTeX
+  \usepackage{newunicodechar}
+  \newunicodechar{≤}{\ensuremath{\leq}}
+  \newunicodechar{≥}{\ensuremath{\geq}}
+  \newunicodechar{≈}{\ensuremath{\approx}}
+  \newunicodechar{↔}{\ensuremath{\leftrightarrow}}
+  \newunicodechar{⟺}{\ensuremath{\iff}}
+  \newunicodechar{∎}{\ensuremath{\blacksquare}}
+  \newunicodechar{✅}{\textcolor{crimson}{\checkmark}}
+  \newunicodechar{❌}{\textcolor{crimsondark}{\ensuremath{\times}}}
+\fi
+
 % Keep long code lines from overflowing the right margin.
 \usepackage{fvextra}
 \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}

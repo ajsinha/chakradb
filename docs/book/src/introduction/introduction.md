@@ -52,9 +52,9 @@ ChakraDB targets is having all four together:
 
 | | Embedded | ACID + MVCC | Concurrent writes + non-blocking scans | Open on-disk format |
 |---|:---:|:---:|:---:|:---:|
-| DuckDB | ✅ | ✅ | ❌ single writer | ⚠️ via extensions |
+| DuckDB | ✅ | ✅ | ❌ single writer | via extensions |
 | SQLite | ✅ | ✅ | ❌ one writer | ❌ |
-| Neo4j | ❌ server | ✅ | ⚠️ lock contention | ❌ |
+| Neo4j | ❌ server | ✅ | lock contention | ❌ |
 | ArcticDB | ✅ | ❌ | ✅ | ✅ |
 | **ChakraDB** | ✅ | ✅ | ✅ | ✅ Arrow IPC parts |
 
