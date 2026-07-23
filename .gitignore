@@ -1,5 +1,8 @@
 /target
 Cargo.lock
 
-# Generated book output (rebuild with scripts/build-book.sh)
-docs/book/build/
+# Generated book output (rebuild with scripts/build-book.sh).
+# Track the two deliverables (PDF + LaTeX); ignore build intermediates.
+docs/book/build/*
+!docs/book/build/chakradb-documentation.pdf
+!docs/book/build/chakradb-documentation.tex
