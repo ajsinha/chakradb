@@ -13,7 +13,8 @@ use pyo3::types::{PyList, PyTuple};
 
 use chakradb::sql::Outcome;
 use chakradb::storage::{Storage, StorageConfig};
-use chakradb::{Database, PosixIo, SqlEngine};
+use chakradb::{Database, Graph as CoreGraph, GraphView as CoreGraphView, NodeId, PosixIo, SqlEngine};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Error categories the Python layer maps onto the DB-API exception hierarchy.
@@ -25,7 +26,7 @@ fn map_err(e: chakradb::Error) -> PyErr {
     use chakradb::Error::*;
     let msg = e.to_string();
     match e {
-        DuplicateKey(_) | KeyNotFound(_) => IntegrityError::new_err(msg),
+        DuplicateKey(_) | KeyNotFound(_) | ConstraintViolation(_) => IntegrityError::new_err(msg),
         Sql(_) | SchemaMismatch(_) | TableNotFound(_) | TableExists(_) => {
             ProgrammingError::new_err(msg)
         }
@@ -134,6 +135,146 @@ impl Connection {
     fn close(&mut self) {
         self.engine = None;
     }
+
+    /// Open a graph backed by table `name` in this same database. Edges written
+    /// through the returned handle are ordinary MVCC rows: transactional, durable,
+    /// and visible to SQL. Analytics run over a consistent snapshot via `view()`.
+    fn graph(&self, name: &str) -> PyResult<Graph> {
+        let backend = self.engine()?.backend().clone();
+        CoreGraph::open(backend, name)
+            .map(|inner| Graph { inner })
+            .map_err(map_err)
+    }
+}
+
+/// A directed, weighted graph stored as clustered adjacency rows in ChakraDB.
+#[pyclass]
+struct Graph {
+    inner: CoreGraph,
+}
+
+#[pymethods]
+impl Graph {
+    /// Insert or update one edge `src -> dst` with `weight` (default 1.0).
+    #[pyo3(signature = (src, dst, weight = 1.0))]
+    fn add_edge(&self, src: NodeId, dst: NodeId, weight: f64) -> PyResult<()> {
+        self.inner.add_edge(src, dst, weight).map_err(map_err)
+    }
+
+    /// Insert or update many edges in one transaction. Accepts an iterable of
+    /// `(src, dst)` or `(src, dst, weight)` tuples.
+    fn add_edges(&self, edges: Vec<(NodeId, NodeId, f64)>) -> PyResult<()> {
+        self.inner.add_edges(edges).map_err(map_err)
+    }
+
+    /// Live out-neighbours of `node` (reads the latest committed state).
+    fn out_neighbors(&self, node: NodeId) -> PyResult<Vec<NodeId>> {
+        self.inner.out_neighbors(node).map_err(map_err)
+    }
+
+    /// Freeze a consistent CSR snapshot for read-only analytics. All algorithms
+    /// run against the returned `GraphView`, so a whole pipeline sees one graph
+    /// even while writers keep appending edges.
+    fn view(&self) -> PyResult<GraphView> {
+        self.inner.view().map(|inner| GraphView { inner }).map_err(map_err)
+    }
+}
+
+/// An immutable, in-memory CSR snapshot of a graph. Every algorithm is a method
+/// here; results are returned as plain Python `dict`/`list` values keyed by node id.
+#[pyclass]
+struct GraphView {
+    inner: CoreGraphView,
+}
+
+#[pymethods]
+impl GraphView {
+    fn node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+    fn edge_count(&self) -> usize {
+        self.inner.edge_count()
+    }
+    fn out_degree(&self, node: NodeId) -> usize {
+        self.inner.out_degree(node)
+    }
+    fn in_degree(&self, node: NodeId) -> usize {
+        self.inner.in_degree(node)
+    }
+    fn in_neighbors(&self, node: NodeId) -> Vec<NodeId> {
+        self.inner.in_neighbors(node)
+    }
+
+    // --- Traversal & paths ---
+    fn bfs(&self, start: NodeId) -> HashMap<NodeId, u32> {
+        self.inner.bfs(start)
+    }
+    fn shortest_path(&self, from: NodeId, to: NodeId) -> Option<Vec<NodeId>> {
+        self.inner.shortest_path(from, to)
+    }
+    fn dijkstra(&self, from: NodeId) -> HashMap<NodeId, f64> {
+        self.inner.dijkstra(from)
+    }
+    fn weighted_shortest_path(&self, from: NodeId, to: NodeId) -> Option<(Vec<NodeId>, f64)> {
+        self.inner.weighted_shortest_path(from, to)
+    }
+    fn topological_order(&self) -> Option<Vec<NodeId>> {
+        self.inner.topological_order()
+    }
+
+    // --- Centrality & importance ---
+    #[pyo3(signature = (iterations = 20, damping = 0.85))]
+    fn pagerank(&self, iterations: usize, damping: f64) -> HashMap<NodeId, f64> {
+        self.inner.pagerank(iterations, damping)
+    }
+    #[pyo3(signature = (seeds, iterations = 40, damping = 0.85))]
+    fn personalized_pagerank(
+        &self,
+        seeds: Vec<NodeId>,
+        iterations: usize,
+        damping: f64,
+    ) -> HashMap<NodeId, f64> {
+        self.inner.personalized_pagerank(&seeds, iterations, damping)
+    }
+    fn degree_centrality(&self) -> HashMap<NodeId, f64> {
+        self.inner.degree_centrality()
+    }
+    fn closeness_centrality(&self) -> HashMap<NodeId, f64> {
+        self.inner.closeness_centrality()
+    }
+    fn betweenness_centrality(&self) -> HashMap<NodeId, f64> {
+        self.inner.betweenness_centrality()
+    }
+
+    // --- Community & structure ---
+    fn connected_components(&self) -> HashMap<NodeId, u32> {
+        self.inner.connected_components()
+    }
+    fn strongly_connected_components(&self) -> Vec<Vec<NodeId>> {
+        self.inner.strongly_connected_components()
+    }
+    /// Non-trivial SCCs — the money-laundering cycles (rings of size ≥ 2).
+    fn laundering_cycles(&self) -> Vec<Vec<NodeId>> {
+        self.inner.laundering_cycles()
+    }
+    #[pyo3(signature = (iterations = 10))]
+    fn label_propagation(&self, iterations: usize) -> HashMap<NodeId, NodeId> {
+        self.inner.label_propagation(iterations)
+    }
+    fn k_core(&self) -> HashMap<NodeId, u32> {
+        self.inner.k_core()
+    }
+    fn triangle_count(&self) -> u64 {
+        self.inner.triangle_count()
+    }
+
+    // --- Similarity ---
+    fn common_neighbors(&self, a: NodeId, b: NodeId) -> Vec<NodeId> {
+        self.inner.common_neighbors(a, b)
+    }
+    fn jaccard_similarity(&self, a: NodeId, b: NodeId) -> f64 {
+        self.inner.jaccard_similarity(a, b)
+    }
 }
 
 /// Convert one rendered cell to a typed Python object using its column type
@@ -160,6 +301,8 @@ fn cell_to_py(py: Python<'_>, cell: &str, ty: char) -> PyObject {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
+    m.add_class::<Graph>()?;
+    m.add_class::<GraphView>()?;
     m.add("IntegrityError", m.py().get_type::<IntegrityError>())?;
     m.add("ProgrammingError", m.py().get_type::<ProgrammingError>())?;
     m.add("OperationalError", m.py().get_type::<OperationalError>())?;

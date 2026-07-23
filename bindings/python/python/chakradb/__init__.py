@@ -25,10 +25,17 @@ from collections.abc import Sequence
 
 from . import _core
 
+#: Native graph handles (see :meth:`Connection.graph`). Re-exported for typing
+#: and ``isinstance`` checks; instances come from ``conn.graph(name)``.
+Graph = _core.Graph
+GraphView = _core.GraphView
+
 __all__ = [
     "connect",
     "Connection",
     "Cursor",
+    "Graph",
+    "GraphView",
     "apilevel",
     "threadsafety",
     "paramstyle",
@@ -396,6 +403,24 @@ class Connection:
 
     def executemany(self, operation: str, seq_of_parameters) -> Cursor:
         return self.cursor().executemany(operation, seq_of_parameters)
+
+    def graph(self, name: str) -> "Graph":
+        """Open a graph backed by table ``name`` in this database.
+
+        Edges are ordinary MVCC rows — transactional, durable, and visible to
+        SQL. Analytics run over a consistent snapshot via :meth:`Graph.view`::
+
+            g = conn.graph("payments")
+            g.add_edges([(1, 2, 100.0), (2, 3, 250.0)])
+            view = g.view()
+            rings = view.laundering_cycles()
+            risk = view.personalized_pagerank(seeds=[1])
+        """
+        self._check()
+        try:
+            return self._conn.graph(name)
+        except Exception as exc:
+            raise _translate(exc) from None
 
     def commit(self):
         self._check()
