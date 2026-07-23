@@ -422,6 +422,27 @@ class Connection:
         except Exception as exc:
             raise _translate(exc) from None
 
+    def on_change(self, table: str, callback) -> None:
+        """Register a change hook fired for every committed write on ``table``.
+
+        ``callback(old, new)`` runs on a background thread as INSERT / UPDATE /
+        DELETE commit; ``old`` and ``new`` are ``dict``s (column → value) or
+        ``None`` for the absent side. The hook fires *after* commit, so it never
+        blocks the writer — the basis of an event-driven pipeline::
+
+            def react(old, new):
+                if new and new["amount"] >= 9000:
+                    alert(new["src"], new["dst"])
+
+            conn.on_change("transactions", react)
+
+        Delivery is at-least-once, in commit order; a raised exception is printed
+        and the stream continues. The subscription lives until the connection is
+        closed.
+        """
+        self._check()
+        self._conn.on_change(table, callback)
+
     def commit(self):
         self._check()
         if self._conn.in_transaction():

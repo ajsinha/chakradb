@@ -13,9 +13,12 @@ use pyo3::types::{PyList, PyTuple};
 
 use chakradb::sql::Outcome;
 use chakradb::storage::{Storage, StorageConfig};
+use chakradb::cdc::{Cdc, CdcBackend, Change};
+use chakradb::value::Value;
 use chakradb::{Database, Graph as CoreGraph, GraphView as CoreGraphView, NodeId, PosixIo, SqlEngine};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread;
 
 // Error categories the Python layer maps onto the DB-API exception hierarchy.
 create_exception!(_core, IntegrityError, PyException);
@@ -35,10 +38,12 @@ fn map_err(e: chakradb::Error) -> PyErr {
 }
 
 /// A native connection: a `SqlEngine` over either an in-memory database or a
-/// durable, WAL-logged directory.
+/// durable, WAL-logged directory. The backend is CDC-wrapped so `on_change`
+/// subscriptions receive committed writes.
 #[pyclass]
 struct Connection {
     engine: Option<SqlEngine>,
+    cdc: Arc<Cdc>,
 }
 
 impl Connection {
@@ -55,19 +60,25 @@ impl Connection {
     /// directory path for a durable, crash-safe one.
     #[new]
     fn new(database: &str) -> PyResult<Self> {
-        let engine = if database.is_empty() || database == ":memory:" {
-            SqlEngine::new(Arc::new(Database::new()))
-        } else {
-            std::fs::create_dir_all(database)
-                .map_err(|e| OperationalError::new_err(format!("cannot open {database}: {e}")))?;
-            let io = PosixIo::open(database)
-                .map_err(|e| OperationalError::new_err(format!("cannot open {database}: {e}")))?;
-            let storage = Storage::open(Arc::new(io), StorageConfig::default())
-                .map_err(|e| OperationalError::new_err(format!("recovery failed: {e}")))?;
-            SqlEngine::durable(Arc::new(storage))
-        };
+        let cdc = Cdc::new();
+        let backend: Arc<dyn chakradb::sql::SqlBackend> =
+            if database.is_empty() || database == ":memory:" {
+                Arc::new(Database::new())
+            } else {
+                std::fs::create_dir_all(database).map_err(|e| {
+                    OperationalError::new_err(format!("cannot open {database}: {e}"))
+                })?;
+                let io = PosixIo::open(database).map_err(|e| {
+                    OperationalError::new_err(format!("cannot open {database}: {e}"))
+                })?;
+                let storage = Storage::open(Arc::new(io), StorageConfig::default())
+                    .map_err(|e| OperationalError::new_err(format!("recovery failed: {e}")))?;
+                Arc::new(storage)
+            };
+        let engine = SqlEngine::with_backend(CdcBackend::wrap(backend, cdc.clone()));
         Ok(Connection {
             engine: Some(engine),
+            cdc,
         })
     }
 
@@ -145,6 +156,69 @@ impl Connection {
             .map(|inner| Graph { inner })
             .map_err(map_err)
     }
+
+    /// Register a change hook: `callback(old, new)` is invoked for every
+    /// committed INSERT / UPDATE / DELETE on `table`, from a background thread.
+    /// `old` and `new` are dicts (column → value), or `None` for the absent side
+    /// of an INSERT / DELETE. The hook fires after the write commits, so it never
+    /// blocks the writer — the foundation of an event-driven pipeline (e.g. AML).
+    ///
+    /// Delivery is at-least-once, in commit order. Keep the callback quick, or
+    /// hand work to a queue; a raised exception is printed and the stream
+    /// continues. The subscription lives until the connection is closed.
+    fn on_change(&self, table: String, callback: PyObject) -> PyResult<()> {
+        let stream = self.cdc.subscribe(Some(&table));
+        thread::spawn(move || {
+            // Block for each committed batch; exit when the publisher is dropped.
+            while let Some(batch) = stream.recv() {
+                Python::with_gil(|py| {
+                    for change in &batch {
+                        let (old, new) = change_to_py(py, change);
+                        if let Err(err) = callback.call1(py, (old, new)) {
+                            err.print(py); // report and keep the stream alive
+                        }
+                    }
+                });
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Build `(old_dict|None, new_dict|None)` from a change, mapping column names to
+/// typed Python values.
+fn change_to_py(py: Python<'_>, change: &Change) -> (PyObject, PyObject) {
+    let side = |vals: &Option<Vec<Value>>| -> PyObject {
+        match vals {
+            None => py.None(),
+            Some(values) => {
+                let d = pyo3::types::PyDict::new(py);
+                for (name, v) in change.columns.iter().zip(values.iter()) {
+                    let _ = d.set_item(name, value_to_py(py, v));
+                }
+                d.into_any().unbind()
+            }
+        }
+    };
+    (side(&change.old), side(&change.new))
+}
+
+/// Convert a ChakraDB `Value` to a native Python object.
+fn value_to_py(py: Python<'_>, v: &Value) -> PyObject {
+    use pyo3::IntoPyObjectExt;
+    let obj: PyResult<PyObject> = match v {
+        Value::Null => return py.None(),
+        Value::Int(i) => i.into_py_any(py),
+        Value::Float(f) => f.into_py_any(py),
+        Value::Bool(b) => b.into_py_any(py),
+        Value::Text(s) => s.into_py_any(py),
+        // Exact fixed-point rendered to float for ergonomics; use SQL for the
+        // exact decimal if you need full precision.
+        Value::Decimal(mantissa, scale) => {
+            (*mantissa as f64 / 10f64.powi(*scale as i32)).into_py_any(py)
+        }
+    };
+    obj.unwrap_or_else(|_| py.None())
 }
 
 /// A directed, weighted graph stored as clustered adjacency rows in ChakraDB.
