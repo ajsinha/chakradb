@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+
+# Generated book output (rebuild with scripts/build-book.sh)
+docs/book/build/

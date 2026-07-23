@@ -1,0 +1,47 @@
+% Custom colored cover for the ChakraDB book (pandoc --include-before-body).
+\begingroup
+\thispagestyle{empty}
+\pagecolor{chakra}
+\color{white}
+\centering
+\vspace*{2.2cm}
+
+% --- Chakra wheel emblem (TikZ) ---
+\begin{tikzpicture}[line width=0.5pt]
+  \definecolor{emblem}{HTML}{FFFFFF}
+  \foreach \r in {0.45, 1.15, 1.7} { \draw[emblem] (0,0) circle (\r); }
+  \foreach \a in {0,30,...,330} {
+    \draw[emblem] (\a:0.45) -- (\a:1.7);
+    \fill[emblem] (\a:1.7) circle (0.055);
+  }
+  \fill[emblem] (0,0) circle (0.09);
+  % two small satellite wheels
+  \begin{scope}[shift={(-2.7,0.6)}, scale=0.42]
+    \draw[emblem] (0,0) circle (1.0);
+    \foreach \a in {0,45,...,315} { \draw[emblem] (0,0) -- (\a:1.0); \fill[emblem] (\a:1.0) circle (0.09); }
+    \fill[emblem] (0,0) circle (0.14);
+  \end{scope}
+  \begin{scope}[shift={(2.7,-0.6)}, scale=0.42]
+    \draw[emblem] (0,0) circle (1.0);
+    \foreach \a in {0,45,...,315} { \draw[emblem] (0,0) -- (\a:1.0); \fill[emblem] (\a:1.0) circle (0.09); }
+    \fill[emblem] (0,0) circle (0.14);
+  \end{scope}
+  \draw[emblem, dashed, line width=0.4pt] (-1.85,0.35) -- (-1.7,0.15);
+  \draw[emblem, dashed, line width=0.4pt] (1.85,-0.35) -- (1.7,-0.15);
+\end{tikzpicture}
+
+\vspace{1.4cm}
+{\scshape\large An Embedded-Database Monograph}\\[0.9cm]
+{\fontsize{46}{50}\selectfont\bfseries ChakraDB}\\[0.35cm]
+{\Large\itshape The Definitive Guide}\\[1.1cm]
+{\large\itshape The embedded \textbf{HTAP} database with built-in graph}\\[0.15cm]
+{\large\itshape capabilities — write, analyze, and traverse live data.}\\[2.2cm]
+
+{\large The ChakraDB Authors}\\[0.5cm]
+{\scshape Architecture $\cdot$ Algorithms $\cdot$ Graph $\cdot$ Comparisons}\quad$\bullet$\quad{\scshape Working Draft, 2026}
+
+\vfill
+\endgroup
+\clearpage
+\nopagecolor
+\color{black}

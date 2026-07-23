@@ -1,0 +1,18 @@
+---
+# The visible title lives in latex/titlepage.tex (a custom colored cover);
+# title-meta (PDF bookmarks) is set on the pandoc command line.
+lang: en
+documentclass: book
+classoption:
+  - 11pt
+  - openany
+geometry:
+  - margin=1in
+toc: true
+toc-depth: 2
+numbersections: true
+colorlinks: true
+linkcolor: RoyalBlue
+urlcolor: MidnightBlue
+toccolor: black
+---

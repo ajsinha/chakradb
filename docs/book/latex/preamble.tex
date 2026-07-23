@@ -1,0 +1,34 @@
+% Raw LaTeX preamble for the ChakraDB book (included verbatim by pandoc via
+% --include-in-header, so it is NOT markdown-processed).
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{pagecolor}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+\usepackage{sectsty}
+\usepackage[most]{tcolorbox}
+
+\definecolor{chakra}{HTML}{B5651D}
+\definecolor{chakradark}{HTML}{7A3E12}
+\chapterfont{\color{chakra}}
+\sectionfont{\color{chakradark}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[RE]{\itshape\nouppercase{\leftmark}}
+\fancyhead[LO]{\itshape\nouppercase{\rightmark}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% A unicode-capable mono font so pseudocode glyphs (alpha, <=, ->, cap, ...)
+% render in code listings. XeTeX only; the book is built with tectonic (XeTeX).
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+  \setmonofont{DejaVu Sans Mono}[Scale=0.82]
+\fi
+
+% Keep long code lines from overflowing the right margin.
+\usepackage{fvextra}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
