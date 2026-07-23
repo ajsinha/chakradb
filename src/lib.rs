@@ -96,7 +96,7 @@ pub use batch::Batch;
 pub use clock::{Clock, RealClock, SimClock};
 pub use csn::{Csn, CsnGenerator, Snapshot, SnapshotPin};
 pub use database::Database;
-pub use graph::{Graph, GraphView, NodeId};
+pub use graph::{ClearingResult, Graph, GraphView, NodeId};
 pub use cdc::{
     Cdc, CdcBackend, Change, ChangeOp, ChangeSink, ChangeStream, Materialized, MaterializedWorker,
     Recv,

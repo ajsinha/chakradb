@@ -210,6 +210,44 @@ fn k_core_and_similarity() {
 }
 
 #[test]
+fn eisenberg_noe_default_cascade() {
+    use std::collections::HashMap;
+    // A liability chain: 1 owes 2 owes 3 (each 100). Node 1 has no external cash.
+    //   external assets: only node 1 has 60; 2 and 3 have nothing of their own.
+    let g = graph();
+    g.add_edges([(1, 2, 100.0), (2, 3, 100.0)]).unwrap();
+    let v = g.view().unwrap();
+
+    let mut ext = HashMap::new();
+    ext.insert(1u32, 60.0); // node 1 can only source 60 against a 100 liability
+
+    let r = v.eisenberg_noe(&ext);
+    // Node 1 pays only 60 of the 100 it owes → it defaults.
+    assert!((r.payments[&1] - 60.0).abs() < 1e-6);
+    assert!(r.defaulted.contains(&1));
+    // Node 2 receives 60, owes 100 → pays 60, also defaults (contagion).
+    assert!((r.payments[&2] - 60.0).abs() < 1e-6);
+    assert!(r.defaulted.contains(&2));
+    // Node 3 owes nothing → never defaults; ends with the 60 it received.
+    assert!(!r.defaulted.contains(&3));
+    assert!((r.equity[&3] - 60.0).abs() < 1e-6);
+}
+
+#[test]
+fn eisenberg_noe_all_solvent_when_funded() {
+    use std::collections::HashMap;
+    let g = graph();
+    g.add_edges([(1, 2, 100.0), (2, 3, 100.0)]).unwrap();
+    let v = g.view().unwrap();
+    // Node 1 fully funded → everyone pays in full, no defaults.
+    let ext = HashMap::from([(1u32, 100.0)]);
+    let r = v.eisenberg_noe(&ext);
+    assert!(r.defaulted.is_empty(), "fully-funded network clears");
+    assert!((r.payments[&1] - 100.0).abs() < 1e-6);
+    assert!((r.payments[&2] - 100.0).abs() < 1e-6);
+}
+
+#[test]
 fn view_is_a_consistent_snapshot_under_writes() {
     // The wedge, for graphs: an algorithm's view is stable while the graph grows.
     let g = sample();

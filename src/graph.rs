@@ -810,6 +810,110 @@ impl GraphView {
         let union = aset.union(&bset).count() as f64;
         inter / union
     }
+
+    /// The **Eisenberg–Noe clearing vector** of a financial liability network —
+    /// the canonical model of default contagion / systemic risk.
+    ///
+    /// Read each directed edge `i -> j` with weight `w` as a *liability*: node
+    /// `i` owes node `j` the amount `w`. `external_assets[i]` is the cash node
+    /// `i` holds from outside the network (its operating cash / collateral). The
+    /// method solves the clearing payment vector `p` satisfying
+    ///
+    /// ```text
+    ///   p_i = min( p̄_i ,  e_i + Σ_j Π_ji · p_j )
+    /// ```
+    ///
+    /// where `p̄_i = Σ_j L_ij` is `i`'s total nominal liability and
+    /// `Π_ji = L_ji / p̄_j` is the share of `j`'s payments owed to `i`. Intuition:
+    /// a node pays the smaller of what it owes and what it actually has once
+    /// upstream payments arrive. It is solved by the monotone Picard iteration
+    /// from `p = p̄` downward, which converges to the greatest clearing vector.
+    ///
+    /// Returns each node's payment, nominal liability, surviving equity, and the
+    /// set of **defaulters** (those that cannot pay in full) — i.e. exactly who a
+    /// default cascade drags under. Feed it a stressed `external_assets` (e.g. one
+    /// counterparty's cash set to zero) to simulate a shock and read the contagion.
+    pub fn eisenberg_noe(&self, external_assets: &HashMap<NodeId, f64>) -> ClearingResult {
+        let n = self.node_count();
+        // Nominal liabilities p̄_i = Σ out-edge weights.
+        let nominal: Vec<f64> = (0..n).map(|u| self.weights(u as u32).iter().sum()).collect();
+        // External assets in dense order.
+        let mut ext = vec![0.0f64; n];
+        for (id, &e) in external_assets {
+            if let Some(&d) = self.index.get(id) {
+                ext[d as usize] = e;
+            }
+        }
+
+        // Σ_j Π_ji · p_j — payments flowing INTO each node under vector `p`.
+        let inflow = |p: &[f64]| -> Vec<f64> {
+            let mut inflow = vec![0.0f64; n];
+            for j in 0..n {
+                if nominal[j] <= 0.0 {
+                    continue;
+                }
+                let ratio = p[j] / nominal[j];
+                let nbrs = self.neighbors(j as u32);
+                let ws = self.weights(j as u32);
+                for (k, &i) in nbrs.iter().enumerate() {
+                    inflow[i as usize] += ws[k] * ratio;
+                }
+            }
+            inflow
+        };
+
+        // Monotone Picard iteration from full payment downward.
+        let mut p = nominal.clone();
+        for _ in 0..1000 {
+            let flow = inflow(&p);
+            let mut delta = 0.0f64;
+            let mut next = vec![0.0f64; n];
+            for i in 0..n {
+                let val = (ext[i] + flow[i]).min(nominal[i]).max(0.0);
+                delta = delta.max((val - p[i]).abs());
+                next[i] = val;
+            }
+            p = next;
+            if delta < 1e-9 {
+                break;
+            }
+        }
+
+        let flow = inflow(&p);
+        let mut payments = HashMap::with_capacity(n);
+        let mut nominal_map = HashMap::with_capacity(n);
+        let mut equity = HashMap::with_capacity(n);
+        let mut defaulted = Vec::new();
+        for i in 0..n {
+            let id = self.ids[i];
+            payments.insert(id, p[i]);
+            nominal_map.insert(id, nominal[i]);
+            equity.insert(id, (ext[i] + flow[i] - p[i]).max(0.0));
+            if p[i] + 1e-6 < nominal[i] {
+                defaulted.push(id);
+            }
+        }
+        ClearingResult {
+            payments,
+            nominal: nominal_map,
+            equity,
+            defaulted,
+        }
+    }
+}
+
+/// The outcome of an [`GraphView::eisenberg_noe`] clearing computation over a
+/// liability network.
+#[derive(Clone, Debug)]
+pub struct ClearingResult {
+    /// Amount each node actually pays under the clearing vector.
+    pub payments: HashMap<NodeId, f64>,
+    /// Total nominal liability each node owes (`p̄_i`).
+    pub nominal: HashMap<NodeId, f64>,
+    /// Surviving equity after clearing (`e_i + received − paid`, floored at 0).
+    pub equity: HashMap<NodeId, f64>,
+    /// Nodes that cannot meet their liabilities in full — the defaulters.
+    pub defaulted: Vec<NodeId>,
 }
 
 /// Min-heap entry for Dijkstra, ordered by cost ascending (over a max-heap).

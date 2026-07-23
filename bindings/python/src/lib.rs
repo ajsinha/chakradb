@@ -407,6 +407,25 @@ impl GraphView {
     fn jaccard_similarity(&self, a: NodeId, b: NodeId) -> f64 {
         self.inner.jaccard_similarity(a, b)
     }
+
+    // --- Systemic risk ---
+    /// Eisenberg–Noe clearing vector over a liability network (edge `i→j` weight
+    /// = what `i` owes `j`). `external_assets` maps node → outside cash. Returns a
+    /// dict `{"payments":…, "nominal":…, "equity":…, "defaulted":[…]}`, all keyed
+    /// by node id — who pays what, who survives, and who a default cascade sinks.
+    fn eisenberg_noe(
+        &self,
+        py: Python<'_>,
+        external_assets: HashMap<NodeId, f64>,
+    ) -> PyResult<PyObject> {
+        let r = self.inner.eisenberg_noe(&external_assets);
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("payments", r.payments)?;
+        d.set_item("nominal", r.nominal)?;
+        d.set_item("equity", r.equity)?;
+        d.set_item("defaulted", r.defaulted)?;
+        Ok(d.into_any().unbind())
+    }
 }
 
 /// Convert one rendered cell to a typed Python object using its column type
