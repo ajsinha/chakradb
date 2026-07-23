@@ -86,6 +86,16 @@ impl SqlEngine {
         }
     }
 
+    /// Bind to any backend directly — including a
+    /// [`CdcBackend`](crate::cdc::CdcBackend) wrapping a `Database` or `Storage`,
+    /// so committed writes publish to a change stream.
+    pub fn with_backend(backend: Arc<dyn SqlBackend>) -> Self {
+        SqlEngine {
+            backend,
+            txn: Mutex::new(None),
+        }
+    }
+
     /// True if a transaction is currently open.
     pub fn in_transaction(&self) -> bool {
         self.txn.lock().unwrap().is_some()

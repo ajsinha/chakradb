@@ -61,6 +61,7 @@
 pub mod backpressure;
 pub mod batch;
 pub mod bloom;
+pub mod cdc;
 pub mod clock;
 pub mod codec;
 pub mod compaction;
@@ -96,6 +97,7 @@ pub use clock::{Clock, RealClock, SimClock};
 pub use csn::{Csn, CsnGenerator, Snapshot, SnapshotPin};
 pub use database::Database;
 pub use graph::{Graph, GraphView, NodeId};
+pub use cdc::{Cdc, CdcBackend, Change, ChangeOp, ChangeSink, ChangeStream};
 pub use durability::Durability;
 pub use error::{Error, Result};
 pub use metrics::{Metrics, MetricsSnapshot};
