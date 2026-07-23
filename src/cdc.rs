@@ -34,7 +34,7 @@ use crate::sql::backend::{SqlBackend, TxnWrite};
 use crate::table::Table;
 use crate::value::Value;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -149,16 +149,20 @@ impl Cdc {
         if batch.is_empty() {
             return;
         }
-        let subs = self.subs.read().unwrap();
-        for s in subs.iter() {
+        // Prune subscribers whose receiver has been dropped (a closed
+        // subscription), so a started-then-closed worker frees its slot.
+        let mut subs = self.subs.write().unwrap();
+        subs.retain(|s| {
             let filtered: Vec<Change> = match &s.table {
                 None => batch.clone(),
                 Some(t) => batch.iter().filter(|c| &c.table == t).cloned().collect(),
             };
-            if !filtered.is_empty() {
-                let _ = s.tx.send(filtered); // receiver gone → drop silently
+            if filtered.is_empty() {
+                return true; // nothing for this subscriber, but it's still live
             }
-        }
+            s.tx.send(filtered).is_ok() // false ⇒ receiver gone ⇒ drop it
+        });
+        drop(subs);
         let sinks = self.sinks.read().unwrap();
         for sink in sinks.iter() {
             sink.emit(&batch);
@@ -168,6 +172,17 @@ impl Cdc {
     fn publish_one(&self, change: Change) {
         self.publish(vec![change]);
     }
+}
+
+/// The outcome of a bounded [`ChangeStream::next_timeout`] wait.
+#[derive(Debug)]
+pub enum Recv {
+    /// One commit's worth of changes.
+    Batch(Vec<Change>),
+    /// No batch arrived within the timeout (the publisher is still live).
+    Timeout,
+    /// The publisher is gone; no further batches will ever arrive.
+    Closed,
 }
 
 /// A pull-based stream of committed change batches. Each item is one commit's
@@ -195,6 +210,16 @@ impl ChangeStream {
     /// Block up to `timeout` for the next batch.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<Vec<Change>> {
         self.rx.recv_timeout(timeout).ok()
+    }
+    /// Block up to `timeout`, distinguishing a delivered batch from a plain
+    /// timeout and from a permanently-closed stream. A worker loop uses this to
+    /// poll a stop flag on timeout and exit cleanly when the publisher is gone.
+    pub fn next_timeout(&self, timeout: Duration) -> Recv {
+        match self.rx.recv_timeout(timeout) {
+            Ok(batch) => Recv::Batch(batch),
+            Err(RecvTimeoutError::Timeout) => Recv::Timeout,
+            Err(RecvTimeoutError::Disconnected) => Recv::Closed,
+        }
     }
     /// Drain every currently-available change into one flat vector.
     pub fn drain(&self) -> Vec<Change> {

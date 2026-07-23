@@ -1,8 +1,24 @@
 # ChakraDB
 
-An embedded **HTAP** database: it accepts a continuous high-rate write stream
-while serving analytical queries that never block — with ACID/MVCC transactions
-and an open, Arrow-native on-disk format.
+**The embedded HTAP database with built-in graph capabilities.** It accepts a
+continuous high-rate write stream while serving analytical queries that never
+block — with ACID/MVCC transactions, an open Arrow-native on-disk format, and a
+**graph engine built into the core**: your tables *are* a graph, and 20+ graph
+algorithms (PageRank, shortest paths, community & cycle detection, centralities)
+run over a consistent live snapshot of them.
+
+> ### 🚩 Flagship example — real-time Anti-Money-Laundering
+> A **complete AML system** ships in [`examples/`](examples/): it generates a
+> synthetic payment network, then detects structuring, layering (laundering
+> cycles), mule fan-out, and risk propagation from known-bad actors — an ensemble
+> of built-in graph algorithms running over one live snapshot, in one embedded
+> process, while transactions keep arriving. This is the workload a stitched-together
+> OLTP + Kafka + graph-DB + OLAP stack cannot serve consistently.
+> ```bash
+> cargo run --release --example aml_realtime --no-default-features   # Rust
+> python examples/aml_app.py                                          # Python
+> ```
+> Full walkthrough: the [Real-Time AML case study](docs/book/src/case-studies/aml.md).
 
 > **Status: working HTAP engine.** Arrow-native storage with arbitrary schemas,
 > a dual-execution SQL layer (interpreter + DataFusion) behind a cost-based
@@ -166,6 +182,30 @@ assert_eq!(users.get(&Value::Int(1), before).unwrap().c(), "alice");
 assert_eq!(users.get_latest(&Value::Int(1)).unwrap().c(), "alice-v2");
 ```
 
+### The graph engine — your tables are a graph
+
+A graph is a table of edges, clustered so a node's neighbours sit together;
+analytics run over a consistent MVCC snapshot. Same in Rust and Python:
+
+```python
+g = con.graph("transfers")                      # backed by a table in the same DB
+g.add_edges([(1, 2, 100.0), (2, 3, 250.0), (3, 1, 90.0)])   # (src, dst, weight)
+
+view = g.view()                                 # one consistent snapshot for analytics
+view.laundering_cycles()                        # [[1, 2, 3]] — a round-trip ring
+view.personalized_pagerank(seeds=[1])           # risk spread from a seed set
+view.pagerank(); view.shortest_path(1, 3); view.connected_components()
+```
+
+Built into the core, available from both languages: `bfs`, `shortest_path`,
+`dijkstra`, `weighted_shortest_path`, `topological_order`, `pagerank`,
+`personalized_pagerank`, `degree`/`closeness`/`betweenness_centrality`,
+`connected_components`, `strongly_connected_components`, `laundering_cycles`,
+`label_propagation`, `k_core`, `triangle_count`, `common_neighbors`,
+`jaccard_similarity`, and more. The [Real-Time AML example](examples/) composes
+them into a working fraud-detection system — see the
+[case study](docs/book/src/case-studies/aml.md).
+
 ---
 
 ## What's proven (with the harness that produced it)
@@ -290,10 +330,13 @@ docs/
   m3-datafusion-spike.md       Adopting DataFusion behind the scan boundary (historical)
   m0/m1/m2-findings.md         Point-in-time milestone records (historical)
   gate2-results.md             The Gate 2 evaluation vs DuckDB (historical)
-src/                           Engine: storage, MVCC, WAL, SQL, DataFusion bridge
-bindings/python/               DB-API 2.0 (PEP 249) driver — works like sqlite3
+src/                           Engine: storage, MVCC, WAL, SQL, graph, DataFusion bridge
+  graph.rs                     The graph engine — CSR snapshots + 20+ algorithms
+examples/                      Runnable apps — incl. the real-time AML system (Rust + Python)
+bindings/python/               DB-API 2.0 (PEP 249) driver + conn.graph(...) — works like sqlite3
+docs/book/                     The book (Markdown + PDF/LaTeX): architecture, algorithms, AML case study
 tests/                         25 integration suites + SQLancer/sqllogictest oracles
-scripts/                       qa.sh + DuckDB comparison drivers
+scripts/                       qa.sh + DuckDB comparison drivers + build-book.sh
 ```
 
 Foreign keys are an explicit non-goal — referential integrity is the

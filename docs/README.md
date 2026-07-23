@@ -15,7 +15,7 @@ ones.
 | [`requirements.md`](requirements.md) | **Architecture & design specification** (v2.1). The engine's design and reasoning; §2.2 states the current operating envelope, §8 the dual-engine execution model, §9 the delivered SQL surface. Sections on lakehouse publication (§6) remain forward-looking. |
 | [`roadmap.md`](roadmap.md) | Milestones, decision gates, and current status (M0–M2 done, M4 hardening in progress, lakehouse M3 not started). |
 | [`clickbench-findings.md`](clickbench-findings.md) | Analytics **benchmarks vs DuckDB**, 100k–10M rows, with the harness that produced them. |
-| [`graph-exploration.md`](graph-exploration.md) | Design proposal: using ChakraDB as a **graph database** (property-graph schema, clustered adjacency, baked-in algorithms). Forward-looking — not implemented. |
+| [`graph-exploration.md`](graph-exploration.md) | The original design proposal for the **graph engine** (property-graph schema, clustered adjacency, baked-in algorithms). Now **implemented** — see `src/graph.rs`, the [graph chapters](book/src/graph/overview.md), and the [Real-Time AML case study](book/src/case-studies/aml.md). |
 
 ## Historical records — preserved snapshots
 

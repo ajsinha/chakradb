@@ -13,12 +13,15 @@ use pyo3::types::{PyList, PyTuple};
 
 use chakradb::sql::Outcome;
 use chakradb::storage::{Storage, StorageConfig};
-use chakradb::cdc::{Cdc, CdcBackend, Change};
+use chakradb::cdc::{Cdc, CdcBackend, Change, Recv};
 use chakradb::value::Value;
 use chakradb::{Database, Graph as CoreGraph, GraphView as CoreGraphView, NodeId, PosixIo, SqlEngine};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 // Error categories the Python layer maps onto the DB-API exception hierarchy.
 create_exception!(_core, IntegrityError, PyException);
@@ -166,22 +169,77 @@ impl Connection {
     /// Delivery is at-least-once, in commit order. Keep the callback quick, or
     /// hand work to a queue; a raised exception is printed and the stream
     /// continues. The subscription lives until the connection is closed.
-    fn on_change(&self, table: String, callback: PyObject) -> PyResult<()> {
+    fn on_change(&self, table: String, callback: PyObject) -> PyResult<Subscription> {
         let stream = self.cdc.subscribe(Some(&table));
-        thread::spawn(move || {
-            // Block for each committed batch; exit when the publisher is dropped.
-            while let Some(batch) = stream.recv() {
-                Python::with_gil(|py| {
-                    for change in &batch {
-                        let (old, new) = change_to_py(py, change);
-                        if let Err(err) = callback.call1(py, (old, new)) {
-                            err.print(py); // report and keep the stream alive
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_worker = stop.clone();
+        let handle = thread::spawn(move || {
+            // Poll with a timeout so a `close()` (the stop flag) is honoured
+            // promptly, and exit cleanly if the publisher goes away.
+            while !stop_worker.load(Ordering::Acquire) {
+                match stream.next_timeout(Duration::from_millis(100)) {
+                    Recv::Batch(batch) => Python::with_gil(|py| {
+                        for change in &batch {
+                            let (old, new) = change_to_py(py, change);
+                            if let Err(err) = callback.call1(py, (old, new)) {
+                                err.print(py); // report and keep the stream alive
+                            }
                         }
-                    }
-                });
+                    }),
+                    Recv::Timeout => continue, // re-check the stop flag
+                    Recv::Closed => break,     // publisher gone
+                }
             }
         });
-        Ok(())
+        Ok(Subscription {
+            stop,
+            handle: Mutex::new(Some(handle)),
+        })
+    }
+}
+
+/// A running change-hook worker, returned by [`Connection::on_change`]. The
+/// external client owns its lifecycle: it runs until `close()` (or until used as
+/// a context manager and the block exits).
+#[pyclass]
+struct Subscription {
+    stop: Arc<AtomicBool>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[pymethods]
+impl Subscription {
+    /// Stop the worker thread and wait for it to finish. Idempotent.
+    fn close(&self, py: Python<'_>) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            // Release the GIL while joining so the worker's final callback (which
+            // needs the GIL) can complete.
+            py.allow_threads(|| {
+                let _ = handle.join();
+            });
+        }
+    }
+
+    /// True while the worker thread is still running.
+    fn is_running(&self) -> bool {
+        !self.stop.load(Ordering::Acquire) && self.handle.lock().unwrap().is_some()
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<PyObject>,
+        _exc_value: Option<PyObject>,
+        _traceback: Option<PyObject>,
+    ) -> bool {
+        self.close(py);
+        false
     }
 }
 
@@ -377,6 +435,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_class::<Graph>()?;
     m.add_class::<GraphView>()?;
+    m.add_class::<Subscription>()?;
     m.add("IntegrityError", m.py().get_type::<IntegrityError>())?;
     m.add("ProgrammingError", m.py().get_type::<ProgrammingError>())?;
     m.add("OperationalError", m.py().get_type::<OperationalError>())?;

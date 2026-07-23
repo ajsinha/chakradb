@@ -1,9 +1,12 @@
 # ChakraDB as a Graph Database — Design Exploration
 
-**Status:** exploration / design proposal (not implemented). This lays out how to
-model a property graph on ChakraDB, why the engine is an unusually good substrate
-for *live* graph analytics, the client API that would make it simple, which
-algorithms to bake into the core, and the honest gaps.
+**Status: implemented.** This began as a design exploration; the graph engine now
+ships in `src/graph.rs` (20+ algorithms over a live MVCC snapshot), is exposed to
+Rust and Python (`Graph::open` / `conn.graph`), and powers the
+[Real-Time AML case study](book/src/case-studies/aml.md). This document is kept as
+the original design rationale: how to model a property graph on ChakraDB, why the
+engine is an unusually good substrate for *live* graph analytics, the client API,
+and which algorithms to bake into the core.
 
 ---
 
