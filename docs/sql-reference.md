@@ -22,12 +22,14 @@ dialect**; identifiers keep their case (no lowercasing), so `AdvEngineID` stays
 | `INSERT INTO t [(cols)] VALUES (...), ...` | Positional or by column list; omitted columns take their `DEFAULT`. |
 | `SELECT ...` | Projections, `WHERE`, `GROUP BY`, `HAVING`-less aggregates, `ORDER BY`, `LIMIT`, `DISTINCT`. |
 | `UPDATE t SET c = expr [, ...] [WHERE ...]` | Every target row is constraint-checked *before* any is applied (statement-atomic). |
-| `DELETE FROM t [WHERE ...]` | |
+| `DELETE FROM t [WHERE ...]` | Removes matching rows. |
+| `DROP TABLE t` | Removes the table and its data. Durable — survives a reopen. |
+| `TRUNCATE t` | Removes all rows, keeps the schema. Durable; frees the keys for reuse. |
 | `COPY t [(cols)] FROM '<file>' [WITH (...)]` | Bulk CSV import — see [COPY](#copy). |
 | `BEGIN` / `COMMIT` / `ROLLBACK` | Transactions — see [Transactions](#transactions). |
 
-Not supported: `ALTER TABLE`, `DROP TABLE`, `CREATE INDEX`, `TRUNCATE`, views,
-`COPY ... TO` (export), `MERGE`, CTEs (`WITH`).
+Not supported: `ALTER TABLE`, `CREATE INDEX`, views, `COPY ... TO` (export),
+`MERGE`, CTEs (`WITH`).
 
 ---
 

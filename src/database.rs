@@ -102,6 +102,24 @@ impl Database {
             .ok_or_else(|| Error::TableNotFound(name.to_string()))
     }
 
+    /// Remove all rows from a table, keeping its schema — by replacing it with a
+    /// fresh empty table of the same shape.
+    pub fn truncate(&self, name: &str) -> Result<()> {
+        let mut tables = self.tables.write().unwrap();
+        let old = tables
+            .get(name)
+            .ok_or_else(|| Error::TableNotFound(name.to_string()))?;
+        let fresh = Arc::new(Table::new(
+            name,
+            old.schema().clone(),
+            self.csn.clone(),
+            self.metrics.clone(),
+            self.default_config.clone(),
+        ));
+        tables.insert(name.to_string(), fresh);
+        Ok(())
+    }
+
     pub fn table_names(&self) -> Vec<String> {
         self.tables.read().unwrap().keys().cloned().collect()
     }

@@ -85,6 +85,14 @@ pub enum Plan {
         limit: Option<usize>,
         distinct: bool,
     },
+    /// `DROP TABLE <name>` — remove a table and its data.
+    DropTable {
+        name: String,
+    },
+    /// `TRUNCATE <name>` — remove all rows, keep the schema.
+    Truncate {
+        name: String,
+    },
     /// `COPY <table> [(cols)] FROM '<path>'` — bulk-load a CSV file.
     Copy {
         table: String,
@@ -166,6 +174,29 @@ fn plan_statement(stmt: sa::Statement, schema_for: SchemaFor) -> Result<Plan, St
         sa::Statement::Delete(del) => plan_delete(del, schema_for),
         sa::Statement::Update(u) => plan_update(u.table, u.assignments, u.selection, schema_for),
         sa::Statement::Query(q) => plan_query(*q, schema_for),
+        sa::Statement::Drop {
+            object_type,
+            names,
+            ..
+        } => {
+            if object_type != sa::ObjectType::Table {
+                return Err(format!("only DROP TABLE is supported, not {object_type:?}"));
+            }
+            if names.len() != 1 {
+                return Err("DROP TABLE takes exactly one table".into());
+            }
+            Ok(Plan::DropTable {
+                name: object_name(&names[0]),
+            })
+        }
+        sa::Statement::Truncate(t) => {
+            if t.table_names.len() != 1 {
+                return Err("TRUNCATE takes exactly one table".into());
+            }
+            Ok(Plan::Truncate {
+                name: object_name(&t.table_names[0].name),
+            })
+        }
         sa::Statement::Copy {
             source,
             to,

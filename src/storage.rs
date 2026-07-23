@@ -377,6 +377,58 @@ impl Storage {
             .ok_or_else(|| Error::TableNotFound(name.to_string()))
     }
 
+    /// Drop a table durably: remove it from the catalog, delete its part files,
+    /// and update the manifest. Any WAL records still referencing the old table
+    /// id are ignored on recovery, because the manifest no longer lists it.
+    pub fn drop_table(&self, name: &str) -> Result<()> {
+        self.warm();
+        self.db.drop_table(name)?;
+        let mut st = self.state.lock().unwrap();
+        if let Some(pos) = st.tables.iter().position(|t| t.name == name) {
+            let meta = st.tables.remove(pos);
+            for &pid in &meta.part_ids {
+                let _ = self.io.remove(&part_path(meta.id, pid));
+            }
+            self.persisted.lock().unwrap().retain(|(tid, _), _| *tid != meta.id);
+            self.table_ids.lock().unwrap().remove(name);
+            self.manifest.commit(&st).map_err(|_| Error::WriteConflict)?;
+        }
+        Ok(())
+    }
+
+    /// Truncate a table durably: drop all its rows, keep its schema. The table is
+    /// given a **fresh id** so its old WAL records (under the old id) are skipped
+    /// on recovery — no checkpoint or extra log record is needed. Its part files
+    /// are deleted.
+    pub fn truncate(&self, name: &str) -> Result<()> {
+        self.warm();
+        let mut st = self.state.lock().unwrap();
+        let pos = st
+            .tables
+            .iter()
+            .position(|t| t.name == name)
+            .ok_or_else(|| Error::TableNotFound(name.to_string()))?;
+        let old_id = st.tables[pos].id;
+        let schema = st.tables[pos].schema.clone();
+        for &pid in &st.tables[pos].part_ids.clone() {
+            let _ = self.io.remove(&part_path(old_id, pid));
+        }
+        let new_id = st.next_table_id;
+        st.next_table_id += 1;
+        st.tables[pos] = TableMeta {
+            id: new_id,
+            name: name.to_string(),
+            schema,
+            part_ids: Vec::new(),
+            next_part_id: 0,
+        };
+        self.persisted.lock().unwrap().retain(|(tid, _), _| *tid != old_id);
+        self.table_ids.lock().unwrap().insert(name.to_string(), new_id);
+        self.manifest.commit(&st).map_err(|_| Error::WriteConflict)?;
+        drop(st);
+        self.db.truncate(name)
+    }
+
     /// Bulk-load rows known to have distinct, new keys, skipping the
     /// duplicate-key probe. For seeding and restore only — using it with a key
     /// that already exists produces two live versions and is a caller bug.

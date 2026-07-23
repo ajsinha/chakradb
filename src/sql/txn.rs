@@ -170,6 +170,27 @@ impl SqlBackend for Transaction {
         Ok(())
     }
 
+    fn drop_table(&self, name: &str) -> Result<()> {
+        // DDL is applied immediately to the real backend (not rolled back in v1)
+        // and mirrored into the overlay.
+        self.real.drop_table(name)?;
+        let _ = self.overlay.drop_table(name);
+        let mut inner = self.inner.lock().unwrap();
+        inner.materialized.remove(name);
+        inner.writes.remove(name);
+        Ok(())
+    }
+
+    fn truncate(&self, name: &str) -> Result<()> {
+        self.real.truncate(name)?;
+        // Re-materialise the (now empty) table into the overlay on next touch.
+        let mut inner = self.inner.lock().unwrap();
+        inner.materialized.remove(name);
+        inner.writes.remove(name);
+        let _ = self.overlay.drop_table(name);
+        Ok(())
+    }
+
     fn table(&self, name: &str) -> Result<Arc<Table>> {
         self.overlay_table(name)
     }

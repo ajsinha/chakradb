@@ -20,6 +20,10 @@ use std::sync::Arc;
 pub trait SqlBackend: Send + Sync {
     /// Create a table with an explicit schema.
     fn create_table(&self, name: &str, schema: Schema) -> Result<()>;
+    /// Remove a table and its data from the catalog.
+    fn drop_table(&self, name: &str) -> Result<()>;
+    /// Remove all rows from a table, keeping its schema.
+    fn truncate(&self, name: &str) -> Result<()>;
     /// Resolve a table for reads (and schema resolution during planning).
     fn table(&self, name: &str) -> Result<Arc<Table>>;
     /// Every table name in the catalog (for registering with an external
@@ -77,6 +81,12 @@ impl SqlBackend for Database {
     fn create_table(&self, name: &str, schema: Schema) -> Result<()> {
         self.create_table_schema(name, schema).map(|_| ())
     }
+    fn drop_table(&self, name: &str) -> Result<()> {
+        Database::drop_table(self, name)
+    }
+    fn truncate(&self, name: &str) -> Result<()> {
+        Database::truncate(self, name)
+    }
     fn table(&self, name: &str) -> Result<Arc<Table>> {
         Database::table(self, name)
     }
@@ -111,6 +121,12 @@ impl SqlBackend for Database {
 impl SqlBackend for Storage {
     fn create_table(&self, name: &str, schema: Schema) -> Result<()> {
         self.create_table_schema(name, schema)
+    }
+    fn drop_table(&self, name: &str) -> Result<()> {
+        Storage::drop_table(self, name)
+    }
+    fn truncate(&self, name: &str) -> Result<()> {
+        Storage::truncate(self, name)
     }
     fn table(&self, name: &str) -> Result<Arc<Table>> {
         // A read may touch lazily-opened parts; warm before handing back the

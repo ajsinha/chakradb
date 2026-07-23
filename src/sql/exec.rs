@@ -59,6 +59,8 @@ pub fn execute(be: &dyn SqlBackend, plan: Plan) -> Result<Outcome, Error> {
             filter,
         } => exec_update(be, &table, sets, filter),
         Plan::Select { .. } => exec_select(be, plan),
+        Plan::DropTable { name } => be.drop_table(&name).map(|_| Outcome::Affected(0)),
+        Plan::Truncate { name } => be.truncate(&name).map(|_| Outcome::Affected(0)),
         Plan::Copy { .. } => exec_copy(be, plan),
     }
 }

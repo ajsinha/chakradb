@@ -1029,7 +1029,8 @@ engine, that must be a contained change. Design for the swap; do not perform it 
 > - **Statements:** `CREATE TABLE`, `INSERT` (positional or column-list, with
 >   `DEFAULT`), `SELECT` (projections, `WHERE`, `GROUP BY`, `ORDER BY`, `LIMIT`,
 >   `DISTINCT`, `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`), `UPDATE`, `DELETE`,
->   `COPY … FROM` (bulk CSV), and `BEGIN`/`COMMIT`/`ROLLBACK`.
+>   `DROP TABLE`, `TRUNCATE`, `COPY … FROM` (bulk CSV), and
+>   `BEGIN`/`COMMIT`/`ROLLBACK`.
 > - **Types:** `INT`, `FLOAT`/`DOUBLE`, `TEXT`/`VARCHAR(n)`/`CHAR(n)`, `BOOLEAN`,
 >   `DATE`, `TIMESTAMP`, exact `DECIMAL(p,s)` (Arrow Decimal128).
 > - **Constraints:** single-column `PRIMARY KEY`, `NOT NULL`, `DEFAULT`, `CHECK`
@@ -1038,7 +1039,7 @@ engine, that must be a contained change. Design for the swap; do not perform it 
 >   joins / subqueries / windows / `LIKE`/`IN`/`CASE`/scalar functions go to
 >   DataFusion (default build), and cannot run inside a transaction.
 >
-> Not supported: `ALTER`/`DROP TABLE`, `CREATE INDEX`, views, `MERGE`, CTEs,
+> Not supported: `ALTER TABLE`, `CREATE INDEX`, views, `MERGE`, CTEs,
 > composite/UNIQUE/FOREIGN keys. The parser-choice reasoning below is unchanged
 > and still governs.
 
