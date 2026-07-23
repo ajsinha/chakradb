@@ -34,8 +34,10 @@ use crate::sql::backend::{SqlBackend, TxnWrite};
 use crate::table::Table;
 use crate::value::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 /// The kind of row change.
@@ -143,6 +145,24 @@ impl Cdc {
         self.sinks.write().unwrap().push(sink);
     }
 
+    /// Register a **materialized worker** over `table`: a named, incrementally-
+    /// maintained derivation of the data. The returned [`Materialized`] runs a
+    /// background thread that folds every committed change into `worker` in commit
+    /// order, tracks the CSN cursor, and lets you query the derived state or stop
+    /// the worker. This is the disciplined "worker" primitive — a *function of the
+    /// data*, not an application host.
+    ///
+    /// Seeding: register the worker before the table is populated to see every
+    /// change, or fold the current rows in yourself first (a snapshot read) and
+    /// then let the stream take over — the cursor tells you where the stream is.
+    pub fn materialize<W: MaterializedWorker>(
+        &self,
+        table: Option<&str>,
+        worker: W,
+    ) -> Materialized<W> {
+        Materialized::spawn(self.subscribe(table), worker)
+    }
+
     /// Publish a batch of changes (one commit's worth). Filters per subscriber by
     /// table and drops any whose receiver has hung up.
     fn publish(&self, batch: Vec<Change>) {
@@ -228,6 +248,134 @@ impl ChangeStream {
             out.extend(batch);
         }
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Materialized workers — named, incrementally-maintained derivations.
+// ---------------------------------------------------------------------------
+
+/// A stateful derivation maintained incrementally from a table's change stream.
+///
+/// Implement this to define *what* is maintained (a running aggregate, a graph
+/// projection, a set of alerts); the [`Materialized`] runtime owns the loop,
+/// commit ordering, cursor tracking, and lifecycle. A worker is deliberately a
+/// **function of the data** — it folds changes into state and nothing more.
+///
+/// ```
+/// use chakradb::cdc::{Change, ChangeOp, MaterializedWorker};
+///
+/// /// Maintains the number of live rows in a table.
+/// #[derive(Default)]
+/// struct RowCount(i64);
+/// impl MaterializedWorker for RowCount {
+///     fn apply(&mut self, change: &Change) {
+///         match change.op {
+///             ChangeOp::Insert => self.0 += 1,
+///             ChangeOp::Delete => self.0 -= 1,
+///             ChangeOp::Update => {}
+///         }
+///     }
+/// }
+/// ```
+pub trait MaterializedWorker: Send + 'static {
+    /// Fold one committed change into the derived state.
+    fn apply(&mut self, change: &Change);
+    /// Called once after each commit batch is applied, with its highest CSN.
+    /// Override for periodic work (e.g. a heavier recompute every N commits).
+    fn on_commit(&mut self, _csn: Csn) {}
+}
+
+/// A running materialized worker: query its derived state, read its CSN cursor,
+/// or stop it. The derivation is maintained on a background thread; the client
+/// owns the lifecycle (`stop`, or drop).
+pub struct Materialized<W> {
+    state: Arc<Mutex<W>>,
+    cursor: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl<W> std::fmt::Debug for Materialized<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Materialized")
+            .field("cursor", &self.cursor.load(Ordering::Acquire))
+            .field("running", &self.handle.lock().map(|h| h.is_some()).unwrap_or(false))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W: MaterializedWorker> Materialized<W> {
+    fn spawn(stream: ChangeStream, worker: W) -> Self {
+        let state = Arc::new(Mutex::new(worker));
+        let cursor = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s, c, st) = (state.clone(), cursor.clone(), stop.clone());
+        let handle = thread::spawn(move || {
+            while !st.load(Ordering::Acquire) {
+                match stream.next_timeout(Duration::from_millis(100)) {
+                    Recv::Batch(batch) => {
+                        let mut w = s.lock().unwrap();
+                        let mut last = c.load(Ordering::Acquire);
+                        for change in &batch {
+                            w.apply(change);
+                            last = last.max(change.csn);
+                        }
+                        w.on_commit(last);
+                        drop(w);
+                        c.store(last, Ordering::Release);
+                    }
+                    Recv::Timeout => continue,
+                    Recv::Closed => break,
+                }
+            }
+        });
+        Materialized {
+            state,
+            cursor,
+            stop,
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    /// Read the derived state under the lock. Use for point queries into the
+    /// materialized result: `m.query(|s| s.total)`.
+    pub fn query<R>(&self, f: impl FnOnce(&W) -> R) -> R {
+        f(&self.state.lock().unwrap())
+    }
+
+    /// Mutate the derived state under the lock (e.g. to reset or seed it).
+    pub fn update<R>(&self, f: impl FnOnce(&mut W) -> R) -> R {
+        f(&mut self.state.lock().unwrap())
+    }
+
+    /// The highest CSN applied so far — how far the derivation has consumed the
+    /// change stream. Persist it to resume after a restart.
+    pub fn cursor(&self) -> Csn {
+        self.cursor.load(Ordering::Acquire)
+    }
+
+    /// True while the background thread is still maintaining the derivation.
+    pub fn is_running(&self) -> bool {
+        !self.stop.load(Ordering::Acquire) && self.handle.lock().unwrap().is_some()
+    }
+
+    /// Stop maintaining the derivation and join the worker thread. Idempotent;
+    /// the last-computed state remains queryable.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl<W> Drop for Materialized<W> {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
     }
 }
 

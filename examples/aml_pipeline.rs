@@ -25,13 +25,13 @@
 //! cargo run --release --example aml_pipeline --no-default-features
 //! ```
 
-use chakradb::cdc::{Cdc, CdcBackend, ChangeOp};
+use chakradb::cdc::{Cdc, CdcBackend, Change, ChangeOp, MaterializedWorker};
 use chakradb::{Database, Graph, NodeId, SqlEngine};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Tunables and the account-id layout (distinct ranges → assertable typologies).
@@ -88,46 +88,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     engine.run("CREATE TABLE alerts (id INTEGER PRIMARY KEY, account INTEGER, typology VARCHAR(32))")?;
 
-    let stream = cdc.subscribe(Some("transactions"));
-    let gen_done = Arc::new(AtomicBool::new(false));
     let produced = Arc::new(AtomicU64::new(0));
-    let alerts = Arc::new(Mutex::new(BTreeMap::<NodeId, BTreeSet<String>>::new()));
 
-    // --- The perpetual AML worker: reacts to the change stream ------------
-    let worker = {
-        let engine = engine.clone();
-        let gen_done = gen_done.clone();
-        let alerts = alerts.clone();
-        thread::spawn(move || {
-            let mut w = Worker::new(engine);
-            let mut seen: u64 = 0;
-            loop {
-                match stream.recv_timeout(std::time::Duration::from_millis(50)) {
-                    Some(batch) => {
-                        for change in &batch {
-                            if change.op == ChangeOp::Insert {
-                                if let Some(new) = &change.new {
-                                    w.on_transaction(new);
-                                    seen += 1;
-                                    if seen.is_multiple_of(T2_INTERVAL) {
-                                        w.global_pass();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        if gen_done.load(Ordering::Acquire) {
-                            break;
-                        }
-                    }
-                }
-            }
-            w.global_pass(); // final sweep
-            *alerts.lock().unwrap() = w.alerts.clone();
-            (seen, w.persisted)
-        })
-    };
+    // Register the AML worker as a MATERIALIZED derivation over the transactions
+    // change stream: it maintains its detectors incrementally, on its own thread,
+    // tracking a CSN cursor — the disciplined "worker" primitive.
+    let aml = cdc.materialize(Some("transactions"), Worker::new(engine.clone()));
 
     // --- The generator: streams synthetic transactions at full speed -------
     let start = Instant::now();
@@ -177,11 +143,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             emit(src, dst, f64::from(rng.range(20, 4_000)) + 0.99, &mut rng);
         }
     }
-    gen_done.store(true, Ordering::Release);
     let ingest = start.elapsed();
-
-    let (seen, persisted) = worker.join().unwrap();
     let total = produced.load(Ordering::Relaxed);
+
+    // Wait for the derivation to consume every produced transaction, then stop
+    // the worker and run one final global pass.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while aml.query(|w| w.seen) < total && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    aml.stop();
+    aml.update(|w| w.global_pass());
+    let seen = aml.query(|w| w.seen);
+    let persisted = aml.query(|w| w.persisted);
     let rate = total as f64 / ingest.as_secs_f64();
 
     println!("Ingest: {total} transactions in {:.2}s", ingest.as_secs_f64());
@@ -193,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Worker: reacted to {seen} committed transactions via the change stream");
     println!("        persisted {persisted} alerts to the `alerts` table\n");
 
-    let flagged = alerts.lock().unwrap().clone();
+    let flagged = aml.query(|w| w.alerts.clone());
     println!("── Accounts flagged (typology ensemble over the live stream) ──");
     for (acct, reasons) in &flagged {
         let label = account_label(*acct);
@@ -239,6 +213,25 @@ struct Worker {
     near_threshold: HashMap<NodeId, u32>,         // dst → #near-threshold deposits
     alerts: BTreeMap<NodeId, BTreeSet<String>>,
     persisted: u64,
+    seen: u64,
+}
+
+/// The AML worker IS a materialized worker: each committed transaction is folded
+/// into the incremental detectors (T0), with a heavy global pass (T2) every
+/// `T2_INTERVAL` events.
+impl MaterializedWorker for Worker {
+    fn apply(&mut self, change: &Change) {
+        if change.op != ChangeOp::Insert {
+            return;
+        }
+        if let Some(new) = &change.new {
+            self.on_transaction(new);
+            self.seen += 1;
+            if self.seen.is_multiple_of(T2_INTERVAL) {
+                self.global_pass();
+            }
+        }
+    }
 }
 
 impl Worker {
@@ -254,6 +247,7 @@ impl Worker {
             near_threshold: HashMap::new(),
             alerts: BTreeMap::new(),
             persisted: 0,
+            seen: 0,
         }
     }
 
