@@ -143,6 +143,73 @@ fn personalized_pagerank_scores_by_proximity_to_seeds() {
 }
 
 #[test]
+fn dijkstra_weighted_paths() {
+    // 1 -(1)-> 2 -(1)-> 4 ;  1 -(5)-> 4  ; the two-hop route is cheaper.
+    let g = graph();
+    g.add_edges([(1, 2, 1.0), (2, 4, 1.0), (1, 4, 5.0)]).unwrap();
+    let v = g.view().unwrap();
+    let d = v.dijkstra(1);
+    assert_eq!(d[&2], 1.0);
+    assert_eq!(d[&4], 2.0, "prefers the cheaper two-hop route");
+    let (path, cost) = v.weighted_shortest_path(1, 4).unwrap();
+    assert_eq!(path, vec![1, 2, 4]);
+    assert_eq!(cost, 2.0);
+    assert!(v.weighted_shortest_path(4, 1).is_none());
+}
+
+#[test]
+fn topological_order_and_cycle() {
+    let g = graph();
+    g.add_edges([(1, 2, 1.0), (1, 3, 1.0), (3, 4, 1.0), (2, 4, 1.0)])
+        .unwrap();
+    let order = g.view().unwrap().topological_order().unwrap();
+    let pos = |x: chakradb::NodeId| order.iter().position(|&y| y == x).unwrap();
+    assert!(pos(1) < pos(2) && pos(2) < pos(4) && pos(3) < pos(4));
+    // Add a back-edge to make a cycle → no topological order.
+    g.add_edge(4, 1, 1.0).unwrap();
+    assert!(g.view().unwrap().topological_order().is_none());
+}
+
+#[test]
+fn centrality_and_community() {
+    // A star with center 1 (1<->2..5) → center has highest betweenness/closeness.
+    let g = graph();
+    for x in 2..=5 {
+        g.add_edge(1, x, 1.0).unwrap();
+        g.add_edge(x, 1, 1.0).unwrap();
+    }
+    let v = g.view().unwrap();
+    let bc = v.betweenness_centrality();
+    let cc = v.closeness_centrality();
+    let top_bc = bc.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+    assert_eq!(*top_bc.0, 1, "the hub has the highest betweenness");
+    assert!(cc[&1] >= cc[&2]);
+    // One connected star → label propagation puts everyone in one community.
+    let comm = v.label_propagation(10);
+    assert!(comm.values().collect::<std::collections::HashSet<_>>().len() <= 2);
+}
+
+#[test]
+fn k_core_and_similarity() {
+    // A triangle 1-2-3 (each undirected degree 2) plus a pendant 3->4.
+    let g = graph();
+    g.add_edges([(1, 2, 1.0), (2, 3, 1.0), (3, 1, 1.0), (3, 4, 1.0)])
+        .unwrap();
+    let v = g.view().unwrap();
+    let core = v.k_core();
+    assert_eq!(core[&1], 2); // in the 2-core (triangle)
+    assert_eq!(core[&4], 1); // pendant: only the 1-core
+    // Common neighbours: both 1 and 2 have an out-edge to 3.
+    let g2 = graph();
+    g2.add_edges([(1, 3, 1.0), (2, 3, 1.0), (1, 9, 1.0)]).unwrap();
+    let v2 = g2.view().unwrap();
+    assert_eq!(v2.common_neighbors(1, 2), vec![3]);
+    assert_eq!(v2.jaccard_similarity(1, 1), 1.0, "a node is identical to itself");
+    // out(1)={3,9}, out(2)={3} → |∩|=1, |∪|=2 → 0.5.
+    assert!((v2.jaccard_similarity(1, 2) - 0.5).abs() < 1e-9);
+}
+
+#[test]
 fn view_is_a_consistent_snapshot_under_writes() {
     // The wedge, for graphs: an algorithm's view is stable while the graph grows.
     let g = sample();

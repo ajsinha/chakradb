@@ -113,13 +113,13 @@ impl Graph {
         let t = self.backend.table(&self.edges)?;
         let batch = t.scan(pin.snapshot());
 
-        // Collect (src, dst) pairs directly from the Arrow columns.
-        let mut pairs: Vec<(NodeId, NodeId)> = Vec::with_capacity(batch.len());
+        // Collect (src, dst, weight) triples directly from the Arrow columns.
+        let mut pairs: Vec<(NodeId, NodeId, f64)> = Vec::with_capacity(batch.len());
         for i in 0..batch.len() {
             let (s, d) = (batch.value(SRC, i).as_int(), batch.value(DST, i).as_int());
-            let _ = batch.value(WEIGHT, i); // reserved for weighted algorithms
+            let w = batch.value(WEIGHT, i).as_f64().unwrap_or(1.0);
             if let (Some(s), Some(d)) = (s, d) {
-                pairs.push((s as NodeId, d as NodeId));
+                pairs.push((s as NodeId, d as NodeId, w));
             }
         }
         drop(pin);
@@ -140,6 +140,8 @@ pub struct GraphView {
     offsets: Vec<u32>,
     /// CSR out-neighbours (dense indices), grouped by source.
     adj: Vec<u32>,
+    /// Edge weights, parallel to `adj` (the weight of the edge to `adj[k]`).
+    wadj: Vec<f64>,
     /// Reverse CSR: offsets and in-neighbours grouped by destination. Needed for
     /// backward traversal, fan-in detection, and strongly-connected components.
     in_offsets: Vec<u32>,
@@ -147,9 +149,9 @@ pub struct GraphView {
 }
 
 impl GraphView {
-    fn from_edges(pairs: Vec<(NodeId, NodeId)>) -> GraphView {
+    fn from_edges(pairs: Vec<(NodeId, NodeId, f64)>) -> GraphView {
         // Dense node numbering over every id that appears as a source or target.
-        let mut ids: Vec<NodeId> = pairs.iter().flat_map(|&(s, d)| [s, d]).collect();
+        let mut ids: Vec<NodeId> = pairs.iter().flat_map(|&(s, d, _)| [s, d]).collect();
         ids.sort_unstable();
         ids.dedup();
         let index: HashMap<NodeId, u32> =
@@ -158,23 +160,26 @@ impl GraphView {
 
         // CSR via counting sort on the source's dense index.
         let mut offsets = vec![0u32; n + 1];
-        for &(s, _) in &pairs {
+        for &(s, _, _) in &pairs {
             offsets[index[&s] as usize + 1] += 1;
         }
         for i in 0..n {
             offsets[i + 1] += offsets[i];
         }
         let mut adj = vec![0u32; pairs.len()];
+        let mut wadj = vec![0.0f64; pairs.len()];
         let mut cursor = offsets.clone();
-        for &(s, d) in &pairs {
+        for &(s, d, w) in &pairs {
             let si = index[&s] as usize;
-            adj[cursor[si] as usize] = index[&d];
+            let slot = cursor[si] as usize;
+            adj[slot] = index[&d];
+            wadj[slot] = w;
             cursor[si] += 1;
         }
 
         // Reverse CSR (grouped by destination) — the same counting sort on `dst`.
         let mut in_offsets = vec![0u32; n + 1];
-        for &(_, d) in &pairs {
+        for &(_, d, _) in &pairs {
             in_offsets[index[&d] as usize + 1] += 1;
         }
         for i in 0..n {
@@ -182,7 +187,7 @@ impl GraphView {
         }
         let mut in_adj = vec![0u32; pairs.len()];
         let mut in_cursor = in_offsets.clone();
-        for &(s, d) in &pairs {
+        for &(s, d, _) in &pairs {
             let di = index[&d] as usize;
             in_adj[in_cursor[di] as usize] = index[&s];
             in_cursor[di] += 1;
@@ -193,9 +198,16 @@ impl GraphView {
             index,
             offsets,
             adj,
+            wadj,
             in_offsets,
             in_adj,
         }
+    }
+
+    #[inline]
+    fn weights(&self, dense: u32) -> &[f64] {
+        let (a, b) = (self.offsets[dense as usize], self.offsets[dense as usize + 1]);
+        &self.wadj[a as usize..b as usize]
     }
 
     /// Number of distinct nodes.
@@ -504,6 +516,319 @@ impl GraphView {
             rank = next;
         }
         self.ids.iter().copied().zip(rank).collect()
+    }
+
+    /// Dijkstra single-source shortest **weighted** distances from `from`, using the
+    /// edge weights as non-negative costs. Unreachable nodes are absent. `O(E log V)`.
+    pub fn dijkstra(&self, from: NodeId) -> HashMap<NodeId, f64> {
+        use std::collections::BinaryHeap;
+        let mut out = HashMap::new();
+        let Some(&s) = self.index.get(&from) else {
+            return out;
+        };
+        let n = self.node_count();
+        let mut dist = vec![f64::INFINITY; n];
+        dist[s as usize] = 0.0;
+        let mut heap = BinaryHeap::from([HeapItem(0.0, s)]);
+        while let Some(HeapItem(d, u)) = heap.pop() {
+            if d > dist[u as usize] {
+                continue; // a stale, longer entry
+            }
+            let (nbrs, ws) = (self.neighbors(u), self.weights(u));
+            for (k, &v) in nbrs.iter().enumerate() {
+                let nd = d + ws[k].max(0.0);
+                if nd < dist[v as usize] {
+                    dist[v as usize] = nd;
+                    heap.push(HeapItem(nd, v));
+                }
+            }
+        }
+        for (i, &d) in dist.iter().enumerate() {
+            if d.is_finite() {
+                out.insert(self.ids[i], d);
+            }
+        }
+        out
+    }
+
+    /// The minimum-cost **weighted** path `from -> to` (Dijkstra with predecessors),
+    /// returning the node sequence and its total cost, or `None` if unreachable.
+    pub fn weighted_shortest_path(&self, from: NodeId, to: NodeId) -> Option<(Vec<NodeId>, f64)> {
+        use std::collections::BinaryHeap;
+        let (&s, &t) = (self.index.get(&from)?, self.index.get(&to)?);
+        let n = self.node_count();
+        let mut dist = vec![f64::INFINITY; n];
+        let mut prev = vec![u32::MAX; n];
+        dist[s as usize] = 0.0;
+        let mut heap = BinaryHeap::from([HeapItem(0.0, s)]);
+        while let Some(HeapItem(d, u)) = heap.pop() {
+            if u == t {
+                break;
+            }
+            if d > dist[u as usize] {
+                continue;
+            }
+            let (nbrs, ws) = (self.neighbors(u), self.weights(u));
+            for (k, &v) in nbrs.iter().enumerate() {
+                let nd = d + ws[k].max(0.0);
+                if nd < dist[v as usize] {
+                    dist[v as usize] = nd;
+                    prev[v as usize] = u;
+                    heap.push(HeapItem(nd, v));
+                }
+            }
+        }
+        if !dist[t as usize].is_finite() {
+            return None;
+        }
+        let mut path = vec![t];
+        let mut cur = t;
+        while cur != s {
+            cur = prev[cur as usize];
+            path.push(cur);
+        }
+        path.reverse();
+        Some((
+            path.into_iter().map(|i| self.ids[i as usize]).collect(),
+            dist[t as usize],
+        ))
+    }
+
+    /// Degree centrality — the (total, in, out) degree of every node, normalised by
+    /// `n − 1`. A quick, cheap importance signal.
+    pub fn degree_centrality(&self) -> HashMap<NodeId, f64> {
+        let n = self.node_count();
+        let denom = (n.saturating_sub(1)).max(1) as f64;
+        (0..n)
+            .map(|u| {
+                let deg = self.neighbors(u as u32).len() + self.in_neighbors_dense(u as u32).len();
+                (self.ids[u], deg as f64 / denom)
+            })
+            .collect()
+    }
+
+    /// Closeness centrality — for each node, `(reachable − 1) / Σ hop-distance`.
+    /// High for nodes that reach the rest of the graph in few hops. Runs a BFS per
+    /// node: `O(V·(V+E))`, so it suits moderate graphs.
+    pub fn closeness_centrality(&self) -> HashMap<NodeId, f64> {
+        let n = self.node_count();
+        let mut out = HashMap::with_capacity(n);
+        let mut depth = vec![u32::MAX; n];
+        let mut queue = std::collections::VecDeque::new();
+        for s in 0..n as u32 {
+            depth.iter_mut().for_each(|d| *d = u32::MAX);
+            depth[s as usize] = 0;
+            queue.clear();
+            queue.push_back(s);
+            let (mut sum, mut reach) = (0u64, 0u64);
+            while let Some(u) = queue.pop_front() {
+                for &v in self.neighbors(u) {
+                    if depth[v as usize] == u32::MAX {
+                        depth[v as usize] = depth[u as usize] + 1;
+                        sum += depth[v as usize] as u64;
+                        reach += 1;
+                        queue.push_back(v);
+                    }
+                }
+            }
+            let c = if sum > 0 { reach as f64 / sum as f64 } else { 0.0 };
+            out.insert(self.ids[s as usize], c);
+        }
+        out
+    }
+
+    /// Betweenness centrality (Brandes, unweighted) — how often a node lies on
+    /// shortest paths between other nodes. The classic "bridge / broker" score.
+    /// `O(V·E)`.
+    pub fn betweenness_centrality(&self) -> HashMap<NodeId, f64> {
+        let n = self.node_count();
+        let mut bc = vec![0.0f64; n];
+        for s in 0..n as u32 {
+            let mut stack = Vec::new();
+            let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n];
+            let mut sigma = vec![0.0f64; n];
+            let mut dist = vec![-1i64; n];
+            sigma[s as usize] = 1.0;
+            dist[s as usize] = 0;
+            let mut queue = std::collections::VecDeque::from([s]);
+            while let Some(u) = queue.pop_front() {
+                stack.push(u);
+                for &v in self.neighbors(u) {
+                    if dist[v as usize] < 0 {
+                        dist[v as usize] = dist[u as usize] + 1;
+                        queue.push_back(v);
+                    }
+                    if dist[v as usize] == dist[u as usize] + 1 {
+                        sigma[v as usize] += sigma[u as usize];
+                        preds[v as usize].push(u);
+                    }
+                }
+            }
+            let mut delta = vec![0.0f64; n];
+            while let Some(w) = stack.pop() {
+                for &v in &preds[w as usize] {
+                    delta[v as usize] +=
+                        (sigma[v as usize] / sigma[w as usize]) * (1.0 + delta[w as usize]);
+                }
+                if w != s {
+                    bc[w as usize] += delta[w as usize];
+                }
+            }
+        }
+        self.ids.iter().copied().zip(bc).collect()
+    }
+
+    /// Label propagation — fast community detection. Each node repeatedly adopts the
+    /// label most common among its (undirected) neighbours, ties broken by lowest
+    /// label. Returns `node -> community label`. `O(iterations·E)`.
+    pub fn label_propagation(&self, iterations: usize) -> HashMap<NodeId, u32> {
+        let n = self.node_count();
+        let mut label: Vec<u32> = (0..n as u32).collect();
+        let mut counts: HashMap<u32, u32> = HashMap::new();
+        for _ in 0..iterations {
+            let mut changed = false;
+            for u in 0..n as u32 {
+                counts.clear();
+                for &v in self
+                    .neighbors(u)
+                    .iter()
+                    .chain(self.in_neighbors_dense(u))
+                {
+                    *counts.entry(label[v as usize]).or_insert(0) += 1;
+                }
+                if let Some((&best, _)) =
+                    counts.iter().max_by_key(|&(&l, &c)| (c, std::cmp::Reverse(l)))
+                {
+                    if label[u as usize] != best {
+                        label[u as usize] = best;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break; // converged
+            }
+        }
+        self.ids.iter().copied().zip(label).collect()
+    }
+
+    /// k-core decomposition — each node's **core number**: the largest `k` such that
+    /// the node belongs to a subgraph where every node has (undirected) degree ≥ `k`.
+    /// A high core number marks a node embedded in a dense cluster. `O(E)`.
+    pub fn k_core(&self) -> HashMap<NodeId, u32> {
+        let n = self.node_count();
+        // Undirected degree.
+        let mut deg: Vec<u32> = (0..n)
+            .map(|u| {
+                let mut s: std::collections::HashSet<u32> = self.neighbors(u as u32).iter().copied().collect();
+                s.extend(self.in_neighbors_dense(u as u32).iter().copied());
+                s.remove(&(u as u32));
+                s.len() as u32
+            })
+            .collect();
+        // Repeatedly peel the minimum-degree node.
+        let mut core = vec![0u32; n];
+        let mut removed = vec![false; n];
+        let mut adj: Vec<std::collections::HashSet<u32>> = (0..n)
+            .map(|u| {
+                let mut s: std::collections::HashSet<u32> = self.neighbors(u as u32).iter().copied().collect();
+                s.extend(self.in_neighbors_dense(u as u32).iter().copied());
+                s.remove(&(u as u32));
+                s
+            })
+            .collect();
+        let mut k = 0u32;
+        for _ in 0..n {
+            // Find the min-degree remaining node.
+            let Some(u) = (0..n).filter(|&i| !removed[i]).min_by_key(|&i| deg[i]) else {
+                break;
+            };
+            k = k.max(deg[u]);
+            core[u] = k;
+            removed[u] = true;
+            let neigh: Vec<u32> = adj[u].iter().copied().collect();
+            for v in neigh {
+                let v = v as usize;
+                if !removed[v] {
+                    adj[v].remove(&(u as u32));
+                    deg[v] = deg[v].saturating_sub(1);
+                }
+            }
+        }
+        self.ids.iter().copied().zip(core).collect()
+    }
+
+    /// A topological ordering of the nodes (Kahn's algorithm), or `None` if the
+    /// graph has a cycle. Useful for dependency / flow ordering. `O(V+E)`.
+    pub fn topological_order(&self) -> Option<Vec<NodeId>> {
+        let n = self.node_count();
+        let mut indeg: Vec<u32> = (0..n).map(|u| self.in_neighbors_dense(u as u32).len() as u32).collect();
+        let mut queue: std::collections::VecDeque<u32> =
+            (0..n as u32).filter(|&u| indeg[u as usize] == 0).collect();
+        let mut order = Vec::with_capacity(n);
+        while let Some(u) = queue.pop_front() {
+            order.push(self.ids[u as usize]);
+            for &v in self.neighbors(u) {
+                indeg[v as usize] = indeg[v as usize].saturating_sub(1);
+                if indeg[v as usize] == 0 {
+                    queue.push_back(v);
+                }
+            }
+        }
+        (order.len() == n).then_some(order) // shorter ⇒ a cycle blocked it
+    }
+
+    /// The common (out-)neighbours of two nodes — a link-prediction signal
+    /// ("friends in common", or accounts both send to).
+    pub fn common_neighbors(&self, a: NodeId, b: NodeId) -> Vec<NodeId> {
+        let (ai, bi) = match (self.index.get(&a), self.index.get(&b)) {
+            (Some(&ai), Some(&bi)) => (ai, bi),
+            _ => return Vec::new(),
+        };
+        let bset: std::collections::HashSet<u32> = self.neighbors(bi).iter().copied().collect();
+        self.neighbors(ai)
+            .iter()
+            .filter(|v| bset.contains(v))
+            .map(|&v| self.ids[v as usize])
+            .collect()
+    }
+
+    /// Jaccard similarity of two nodes' out-neighbourhoods: `|A∩B| / |A∪B|`, in
+    /// `[0, 1]`. The standard neighbourhood-overlap link-prediction / recommendation
+    /// score.
+    pub fn jaccard_similarity(&self, a: NodeId, b: NodeId) -> f64 {
+        let (ai, bi) = match (self.index.get(&a), self.index.get(&b)) {
+            (Some(&ai), Some(&bi)) => (ai, bi),
+            _ => return 0.0,
+        };
+        let aset: std::collections::HashSet<u32> = self.neighbors(ai).iter().copied().collect();
+        let bset: std::collections::HashSet<u32> = self.neighbors(bi).iter().copied().collect();
+        if aset.is_empty() && bset.is_empty() {
+            return 0.0;
+        }
+        let inter = aset.intersection(&bset).count() as f64;
+        let union = aset.union(&bset).count() as f64;
+        inter / union
+    }
+}
+
+/// Min-heap entry for Dijkstra, ordered by cost ascending (over a max-heap).
+struct HeapItem(f64, u32);
+impl PartialEq for HeapItem {
+    fn eq(&self, o: &Self) -> bool {
+        self.0 == o.0
+    }
+}
+impl Eq for HeapItem {}
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for HeapItem {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        // Reversed so BinaryHeap (a max-heap) yields the smallest cost first.
+        o.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
