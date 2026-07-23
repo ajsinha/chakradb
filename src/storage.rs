@@ -587,6 +587,34 @@ impl Storage {
         self.wal.flush()
     }
 
+    /// Back up this store's durable state to another `Io` (a directory, an
+    /// in-memory target, etc.). The result is a self-contained, restorable copy:
+    /// the manifest, all part files, and the WAL.
+    ///
+    /// **Consistency.** The WAL is flushed first, then the copy runs while holding
+    /// the checkpoint lock — so a concurrent `checkpoint`/`compact_all` cannot
+    /// rewrite the manifest or parts underneath it. Writers keep committing (they
+    /// only append to the WAL); the backup captures the WAL up to its length at
+    /// copy time, and restore replays it exactly as crash recovery would. The
+    /// source is untouched and stays fully usable.
+    pub fn backup_to(&self, dst: &Arc<dyn Io>) -> stdio::Result<()> {
+        self.flush()?;
+        let _guard = self.state.lock().unwrap();
+        copy_store(self.io.as_ref(), dst.as_ref())
+    }
+
+    /// Restore a store from a backup (`src`, as produced by [`Storage::backup_to`])
+    /// into a fresh location (`dst`), then open it. `src` is left intact, so a
+    /// backup can be restored more than once.
+    pub fn restore(
+        src: Arc<dyn Io>,
+        dst: Arc<dyn Io>,
+        config: StorageConfig,
+    ) -> stdio::Result<Storage> {
+        copy_store(src.as_ref(), dst.as_ref())?;
+        Storage::open(dst, config)
+    }
+
     /// Run compaction across all tables, then persist the result.
     ///
     /// Reclaims only versions no live reader can observe: the horizon is the
@@ -639,4 +667,50 @@ pub struct StorageStats {
     pub pressure: Pressure,
     /// Per-table breakdown.
     pub tables_detail: Vec<TableStats>,
+}
+
+/// Copy every file of a store from `src` to `dst`, making `dst` a faithful copy:
+/// files absent from `src` are removed from `dst` first (so repeated backups to
+/// the same target stay clean), then each source file is copied in full. The
+/// single-writer `LOCK` file is excluded by `Io::list`, so a restored copy takes
+/// its own lock on open.
+fn copy_store(src: &dyn Io, dst: &dyn Io) -> stdio::Result<()> {
+    let src_files = src.list();
+    let keep: std::collections::HashSet<&str> = src_files.iter().map(|s| s.as_str()).collect();
+    for stale in dst.list() {
+        if !keep.contains(stale.as_str()) {
+            dst.remove(&stale)?;
+        }
+    }
+    for name in &src_files {
+        copy_file(src, dst, name)?;
+    }
+    Ok(())
+}
+
+/// Copy one file `src:name -> dst:name` in full, in bounded chunks so a large
+/// part file never materialises entirely in memory. `dst:name` is truncated
+/// first and `fsync`'d after, so the copy is durable.
+fn copy_file(src: &dyn Io, dst: &dyn Io, name: &str) -> stdio::Result<()> {
+    const CHUNK: usize = 1 << 20; // 1 MiB
+    let sf = src.open(name)?;
+    let len = sf.len()?;
+    let df = dst.open(name)?;
+    df.truncate(0)?;
+    let mut buf = vec![0u8; CHUNK];
+    let mut off = 0u64;
+    while off < len {
+        let want = ((len - off) as usize).min(CHUNK);
+        let read = sf.pread(off, &mut buf[..want])?;
+        if read == 0 {
+            break; // shorter than len() reported — stop cleanly
+        }
+        let mut written = 0;
+        while written < read {
+            written += df.pwrite(off + written as u64, &buf[written..read])?;
+        }
+        off += read as u64;
+    }
+    df.sync()?;
+    Ok(())
 }
