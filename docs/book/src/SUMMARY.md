@@ -79,6 +79,7 @@
 
 # Part VIII — Case Studies
 
+- [Real-Time AML: A Full System (HTAP + Graph)](case-studies/aml.md)
 - [Real-Time Fraud Detection (HTAP + Graph)](case-studies/fraud.md)
 - [Live Recommendation Engine](case-studies/recommendations.md)
 - [Streaming Analytics Dashboard](case-studies/streaming.md)
