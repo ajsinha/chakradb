@@ -1,5 +1,9 @@
 # Write-Ahead Logging & Group Commit
 
+```{=latex}
+\epigraph{The faintest ink is more powerful than the strongest memory.}{--- Proverb}
+```
+
 Durability is the promise that an acknowledged write survives a crash. ChakraDB
 keeps it with a write-ahead log: every mutation is framed, checksummed, and made
 durable *before* the write is acknowledged. Group commit amortizes the `fsync` so

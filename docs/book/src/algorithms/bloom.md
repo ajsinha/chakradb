@@ -1,5 +1,9 @@
 # Bloom Filters & the Lookup Funnel
 
+```{=latex}
+\epigraph{It is the mark of an educated mind to rest satisfied with the degree of precision which the nature of the subject admits.}{--- Aristotle}
+```
+
 A point lookup should not read a part that does not contain the key. The min/max
 bounds catch some parts; a **Bloom filter** catches the rest — it answers "could key
 `k` be here?" from a few bits in memory, with no disk touch and no false negatives.

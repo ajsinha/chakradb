@@ -1,5 +1,9 @@
 # The GC Watermark & Live-Snapshot Registry
 
+```{=latex}
+\epigraph{Perfection is achieved not when there is nothing more to add, but when there is nothing left to take away.}{--- Antoine de Saint-Exup\'ery}
+```
+
 Compaction reclaims space by dropping row versions no one can see any more. Get the
 "no one can see" test wrong and you get the worst kind of bug: a silent wrong answer
 for a reader on an old snapshot. This chapter is how ChakraDB gets it right — the

@@ -1,5 +1,9 @@
 # Crash Recovery
 
+```{=latex}
+\epigraph{Fall seven times, stand up eight.}{--- Japanese proverb}
+```
+
 Recovery reconstructs the exact acknowledged state after a crash: the catalog from
 the manifest, the data from the parts, and everything since the last checkpoint by
 replaying the WAL — discarding any torn tail.

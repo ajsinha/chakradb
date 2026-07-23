@@ -1,5 +1,9 @@
 # The Merge / Compaction Algorithm
 
+```{=latex}
+\epigraph{Order and simplification are the first steps toward the mastery of a subject.}{--- Thomas Mann}
+```
+
 Writes create parts; parts accumulate; scans slow down. Compaction is the debt
 payment: it merges parts into fewer, larger, sorted parts, physically drops rows no
 live reader can see, and collapses redundant version stamps. It is **caller-driven**

@@ -1,5 +1,9 @@
 # The Storage Engine
 
+```{=latex}
+\epigraph{Show me your flowcharts and conceal your tables, and I shall continue to be mystified. Show me your tables, and I won't usually need your flowcharts; they'll be obvious.}{--- Fred Brooks}
+```
+
 ChakraDB's storage is **log-structured** and **Arrow-native**. Writes land in
 memory and are sealed into immutable columnar parts; reads see a merged view
 across the tiers. This chapter is the shape of the store; the algorithms that run

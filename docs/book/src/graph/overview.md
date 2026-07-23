@@ -1,5 +1,9 @@
 # Graphs on ChakraDB
 
+```{=latex}
+\epigraph{Only connect!}{--- E. M. Forster}
+```
+
 ChakraDB's graph layer is not a second database bolted onto a relational one. It is
 a thin layer that *exposes what the engine already is*. Three properties we built
 for HTAP turn out to be exactly what a graph engine wants.

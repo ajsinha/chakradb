@@ -1,5 +1,9 @@
 # Transactions
 
+```{=latex}
+\epigraph{May all your transactions commit and never leave you in doubt.}{--- Jim Gray}
+```
+
 `BEGIN … COMMIT` gives ChakraDB ACID multi-statement transactions with **snapshot
 isolation** and **first-committer-wins** conflict detection. The design is a
 private **overlay** that is invisible until commit, so a crash or `ROLLBACK` simply

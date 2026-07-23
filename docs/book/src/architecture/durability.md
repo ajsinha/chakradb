@@ -1,5 +1,9 @@
 # Durability: WAL, Group Commit & Recovery
 
+```{=latex}
+\epigraph{The palest ink is better than the best memory.}{--- Chinese proverb}
+```
+
 A durable ChakraDB (`Storage`) guarantees that an acknowledged write survives a
 crash. The mechanism is a classic **write-ahead log** with **group commit**, a
 **manifest** for the catalog and part set, and a **recovery** pass that replays the

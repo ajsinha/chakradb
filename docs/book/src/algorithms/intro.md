@@ -1,5 +1,9 @@
 # How to Read This Part
 
+```{=latex}
+\epigraph{An algorithm must be seen to be believed.}{--- Donald Knuth}
+```
+
 This part is the engine at the level of its algorithms. Where Part II described the
 *shape* of ChakraDB — the tiers, the clock, the log — this part gives the
 *procedures*, each with pseudocode, a complexity, and, where correctness is

@@ -1,5 +1,9 @@
 # Clustered Adjacency
 
+```{=latex}
+\epigraph{Good fences make good neighbours.}{--- Robert Frost}
+```
+
 The single hard constraint ChakraDB puts on a graph is also the source of its
 adjacency speed. The engine has a **single-column primary key** and **no secondary
 indexes**. So "find all edges with `src = X`" is fast *only if the edge table is

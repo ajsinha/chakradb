@@ -1,5 +1,9 @@
 # MVCC & Snapshot Isolation
 
+```{=latex}
+\epigraph{Time is what keeps everything from happening at once.}{--- Ray Cummings}
+```
+
 Multi-Version Concurrency Control is the reason readers never block writers. This
 chapter is the *model*; the [visibility algorithm](../algorithms/visibility.md) and
 the [GC watermark](../algorithms/gc-watermark.md) get the full treatment in Part

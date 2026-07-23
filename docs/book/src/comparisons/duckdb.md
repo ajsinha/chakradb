@@ -1,5 +1,9 @@
 # ChakraDB vs. DuckDB
 
+```{=latex}
+\epigraph{If you know the enemy and know yourself, you need not fear the result of a hundred battles.}{--- Sun Tzu}
+```
+
 DuckDB is the reference point — the best-in-class embedded analytical engine. This
 chapter is honest about where DuckDB wins, where ChakraDB wins, and the one axis
 where the comparison is *structural* rather than a matter of tuning.

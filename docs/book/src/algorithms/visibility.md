@@ -1,5 +1,9 @@
 # MVCC Visibility
 
+```{=latex}
+\epigraph{Everything we see is a perspective, not the truth.}{--- Marcus Aurelius}
+```
+
 Visibility is the pure function at the heart of snapshot isolation. It decides,
 for a snapshot `S` and a row version stamped `(created, deleted)`, whether that
 version is the one `S` should see. Everything about ChakraDB's non-blocking reads

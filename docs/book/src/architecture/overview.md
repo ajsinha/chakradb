@@ -1,5 +1,9 @@
 # System Overview
 
+```{=latex}
+\epigraph{Architecture is the decisions that you wish you could get right early in a project.}{--- Ralph Johnson}
+```
+
 ChakraDB is a stack of narrow layers with one guiding split: **buy execution,
 build storage.** The vectorized analytical engine is Apache DataFusion; the
 storage engine, MVCC, durability, transactional interpreter, and graph layer are

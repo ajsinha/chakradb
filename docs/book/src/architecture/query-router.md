@@ -1,5 +1,9 @@
 # The Query Layer: The HTAP Router
 
+```{=latex}
+\epigraph{If the only tool you have is a hammer, it is tempting to treat everything as if it were a nail.}{--- Abraham Maslow}
+```
+
 ChakraDB runs **two** execution engines and routes each statement to whichever
 fits. This is the concrete shape of "buy execution, build storage": DataFusion is
 bought for vectorized analytics; a compact interpreter is built for the

@@ -1,5 +1,9 @@
 # Case Study: Real-Time Fraud Detection (HTAP + Graph)
 
+```{=latex}
+\epigraph{Trust, but verify.}{--- Russian proverb}
+```
+
 This case study exercises everything at once: transactional ingest, analytical
 scoring, and graph traversal — over **one consistent snapshot**, in one embedded
 process. It is the workload ChakraDB is built for.

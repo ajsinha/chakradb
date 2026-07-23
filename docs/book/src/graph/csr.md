@@ -1,5 +1,9 @@
 # The CSR Snapshot
 
+```{=latex}
+\epigraph{Simplicity is prerequisite for reliability.}{--- Edsger W. Dijkstra}
+```
+
 Whole-graph algorithms — BFS, PageRank, connected components — do not want to issue
 a range scan per node. They want the **Compressed Sparse Row (CSR)** representation:
 a flat neighbor array plus per-node offsets, giving cache-friendly `O(1)` neighbor

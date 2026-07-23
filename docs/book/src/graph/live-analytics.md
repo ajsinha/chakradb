@@ -1,5 +1,9 @@
 # Live Graph Analytics
 
+```{=latex}
+\epigraph{You can never cross the ocean until you have the courage to lose sight of the shore.}{--- Andr\'e Gide}
+```
+
 This is the chapter that says *why ChakraDB's graph layer is different*, not just
 convenient. The difference is one word: **live.**
 

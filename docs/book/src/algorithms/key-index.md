@@ -1,5 +1,9 @@
 # The Sorted-Part Key Index
 
+```{=latex}
+\epigraph{There is no permanent place in the world for ugly mathematics.}{--- G. H. Hardy}
+```
+
 This is the hardest and most consequential piece of the storage engine: how a row
 is located by key without paying for a key→location map. The answer — following
 Apache Doris / StarRocks — is that **the sorted key column *is* the index.**

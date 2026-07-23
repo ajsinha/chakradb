@@ -1,5 +1,9 @@
 # Temporal Encoding
 
+```{=latex}
+\epigraph{Time is the longest distance between two places.}{--- Tennessee Williams}
+```
+
 `DATE` and `TIMESTAMP` are **logical types over integer storage**: a date is a count
 of days since the Unix epoch, a timestamp a count of microseconds. That choice keeps
 comparison, zonemaps, keys, and MVCC working unchanged on integers, while exposing

@@ -11,9 +11,6 @@
 # Part I — Introduction
 
 - [Introduction to ChakraDB](introduction/introduction.md)
-- [The Problem: Why Another Database?](introduction/the-problem.md)
-- [Design Principles](introduction/design-principles.md)
-- [The Cost Model](introduction/cost-model.md)
 
 # Part II — Architecture
 

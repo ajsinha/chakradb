@@ -1,5 +1,9 @@
 # Zonemap Part Pruning
 
+```{=latex}
+\epigraph{The essence of strategy is choosing what not to do.}{--- Michael Porter}
+```
+
 A selective query should not read parts that cannot contain a match. ChakraDB skips
 them using **zonemaps** — the per-column `(min, max)` bounds every part carries.
 This is DuckDB-style rowgroup pruning, and it is also the mechanism behind [graph

@@ -1,5 +1,9 @@
 # About This Book
 
+```{=latex}
+\epigraph{If I have seen further it is by standing on the shoulders of Giants.}{--- Isaac Newton}
+```
+
 This is the complete guide to **ChakraDB** — an embedded HTAP database with
 built-in graph capabilities. It is written for three audiences at once, and it is
 organized so each can find its level:

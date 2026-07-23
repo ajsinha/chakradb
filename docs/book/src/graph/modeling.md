@@ -1,5 +1,9 @@
 # Modeling a Property Graph
 
+```{=latex}
+\epigraph{All models are wrong, but some are useful.}{--- George E. P. Box}
+```
+
 A property graph is **nodes and edges**, each with a label/type and properties. On
 ChakraDB it maps to ordinary tables — with one twist that makes traversal fast.
 

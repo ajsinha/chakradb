@@ -1,5 +1,9 @@
 # Query Routing (Cost Model)
 
+```{=latex}
+\epigraph{Different roads sometimes lead to the same castle.}{--- George R. R. Martin}
+```
+
 The HTAP router decides, for each statement, whether to run it on the hand-written
 **interpreter** or on **DataFusion**. The decision is cheap — it inspects the
 *planned* statement, not the data — and it is the concrete cost model that lets one

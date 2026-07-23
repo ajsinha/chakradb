@@ -1,5 +1,9 @@
 # Exact Decimal Arithmetic
 
+```{=latex}
+\epigraph{Round numbers are always false.}{--- Samuel Johnson}
+```
+
 Money must not round. ChakraDB's `DECIMAL(p, s)` is exact fixed-point — an `i128`
 unscaled mantissa with a scale, backed by Arrow `Decimal128`, never `f64`. This
 chapter is how values are parsed, compared, and summed without ever touching a

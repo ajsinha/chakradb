@@ -1,5 +1,9 @@
 # Graph Algorithms
 
+```{=latex}
+\epigraph{A journey of a thousand miles begins with a single step.}{--- Lao Tzu}
+```
+
 All of ChakraDB's graph algorithms run over a `GraphView` — the immutable
 [CSR snapshot](csr.md). Because the view is a consistent copy taken from one MVCC
 snapshot, every algorithm below runs **concurrently with ingest**: writers keep
