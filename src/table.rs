@@ -330,6 +330,32 @@ impl Table {
         Batch::concat(&self.schema, &batches)
     }
 
+    /// Scan the rows whose key lies in `[lo, hi)`, pruning any sealed part whose
+    /// key range cannot overlap it. This is the clustered-range primitive: with a
+    /// key that sorts by a leading field (e.g. a graph edge key `(src, dst)`), it
+    /// answers "all rows with that leading field" by touching only the parts that
+    /// hold them — the adjacency lookup behind the graph layer.
+    pub fn scan_key_range(&self, lo: &Value, hi: &Value, snap: Snapshot) -> Vec<Row> {
+        let mut out = Vec::new();
+        for seg in self.scan_segments(snap) {
+            // A sealed, fully-visible part carries exact key bounds — skip it if
+            // its range is entirely below `lo` or at/above `hi`.
+            if let Segment::Part(p) = &seg {
+                if p.max_key().total_cmp(lo).is_lt() || p.min_key().total_cmp(hi).is_ge() {
+                    continue;
+                }
+            }
+            let batch = seg.batch();
+            for i in 0..batch.len() {
+                let k = batch.key(i);
+                if k.total_cmp(lo).is_ge() && k.total_cmp(hi).is_lt() {
+                    out.push(batch.row(i));
+                }
+            }
+        }
+        out
+    }
+
     /// Scan as a list of **segments** the query executor can evaluate in place.
     ///
     /// This is the fast path for analytical queries. A fully-visible part is
