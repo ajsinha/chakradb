@@ -9,27 +9,23 @@ built-in graph capabilities. It is written for three audiences at once, and it i
 organized so each can find its level:
 
 - **Users** who want to build applications — start at Part V (*Getting Started*)
-  and Part VI (*Developer Guide & Tutorials*).
+  and the Part VI (*Case Studies*).
 - **Architects** evaluating the engine — read Part I (*Introduction*), Part II
-  (*Architecture*), and Part IX (*Comparative Studies*).
+  (*The Engine*), and Part VII (*Perspective*).
 - **Contributors and the curious** who want to know *how* it works down to the
-  algorithm — Part III (*Algorithms*) is the deep end.
+  algorithm — Parts II–IV carry the pseudocode and complexity.
 
 ## How the book is organized
 
 | Part | What it covers |
 |---|---|
 | I — Introduction | What ChakraDB is, the problem it solves, its design principles and cost model. |
-| II — Architecture | The engine's structure: storage, MVCC, durability, compaction, the query router. |
-| III — Algorithms | Each core algorithm in detail, with pseudocode and complexity. |
-| IV — Graph | The property-graph layer: adjacency, CSR snapshots, and graph algorithms. |
-| V — Getting Started | Install, first database, Python, first graph. |
-| VI — Developer Guide | SQL, types, constraints, transactions, COPY, backup, observability, tutorials. |
-| VII — Operations | Durability tuning, limits, monitoring, disaster recovery. |
-| VIII — Case Studies | Worked end-to-end applications. |
-| IX — Comparative Studies | Head-to-head with DuckDB, SQLite, Neo4j, PostgreSQL, with methodology. |
-| X — Reference | The Rust and Python APIs, configuration, errors, file formats. |
-| Appendices | Glossary, design-decision log, bibliography. |
+| II — The Engine | Storage (parts, index, compaction, pruning), MVCC & transactions, durability, the HTAP query router, and exact types — the design *and* the algorithms, together. |
+| III — The Graph Engine | The property-graph layer: clustered adjacency, CSR snapshots, and the full graph-algorithm library. |
+| IV — Reactive | The change stream (CDC), materialized workers and the registry, and the sink transports — how applications react to committed data. |
+| V — Getting Started | Install, first database, Python, and a first graph — Rust and Python. |
+| VI — Case Studies | Worked end-to-end applications: real-time AML, counterparty & market risk, recommendations, and fraud. |
+| VII — Perspective | Head-to-head with the alternatives, and where ChakraDB fits. |
 
 ## Conventions
 

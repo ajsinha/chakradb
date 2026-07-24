@@ -5,8 +5,8 @@
 ```
 
 Multi-Version Concurrency Control is the reason readers never block writers. This
-chapter is the *model*; the [visibility algorithm](mvcc.md) and
-the [GC watermark](mvcc.md) get the full treatment in Part
+chapter is the *model*; the visibility algorithm and
+the GC watermark get the full treatment in Part
 III.
 
 ## The commit sequence number (CSN)
@@ -91,7 +91,7 @@ registry**: a long-running reader (a query or a transaction) *pins* its snapshot
 and compaction's reclamation horizon is held back to the oldest pinned snapshot. A
 reader on an old snapshot keeps its view even as newer writes are compacted away.
 The full mechanism — and why it is correct under concurrency — is in
-[The GC Watermark](mvcc.md).
+The GC Watermark.
 
 ## Durability of the clock
 
@@ -340,8 +340,8 @@ flowchart LR
 
 ## Snapshot isolation
 
-The transaction pins its `BEGIN` snapshot (which also holds the [GC
-watermark](mvcc.md) back, so the versions it may read are not
+The transaction pins its `BEGIN` snapshot (which also holds the GC
+watermark back, so the versions it may read are not
 compacted away). Every statement in the transaction reads that one consistent
 instant, extended by its own writes. Other connections' commits are invisible.
 

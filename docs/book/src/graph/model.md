@@ -40,7 +40,7 @@ flowchart TB
    "Neighbors of X" becomes a key-range scan that
    [zonemap pruning](../engine/storage.md) answers by touching only the parts
    holding `src = X`. No secondary index; the primary-key sort *is* the adjacency
-   index. See [Clustered Adjacency](model.md).
+   index. See Clustered Adjacency.
 
 2. **Live graph analytics.** A whole-graph algorithm builds its working set from
    **one MVCC snapshot**. Writers keep adding edges; the algorithm sees a
@@ -89,7 +89,7 @@ this part builds the layer up: modeling, adjacency, CSR, and the algorithms.
 > `tests/graph.rs`) — directed edges, adjacency, CSR views, and the core
 > algorithm set. Node ids are currently `u32`; a native composite key (on the
 > roadmap) will lift that and remove the key-encoding step. See
-> [Modeling a Property Graph](model.md).
+> Modeling a Property Graph.
 
 ## Modeling a Property Graph
 
@@ -165,7 +165,7 @@ COMMIT;
   edges is the application's responsibility.
 - **Node ids beyond 2³¹** — the packed-key encoding's current ceiling.
 
-The next chapters — [Clustered Adjacency](model.md) and [The CSR
+The sections below — clustered adjacency, and then [The CSR
 Snapshot](snapshot.md) — show why this simple mapping traverses fast.
 
 ## Clustered Adjacency
@@ -232,7 +232,7 @@ Only Part B can hold `src = 500`, so only Part B is scanned. This is the same
 [zonemap part pruning](../engine/storage.md) that accelerates a selective SQL
 `WHERE` — reused as the graph adjacency index. In the ClickBench benchmark, a
 key-range scan of this shape stays effectively **O(1) as the table grows 100×**
-(Part IX). For a graph, that means neighbor lookup cost tracks the node's degree,
+For a graph, that means neighbor lookup cost tracks the node's degree,
 not the graph's size.
 
 The primitive in the engine is:

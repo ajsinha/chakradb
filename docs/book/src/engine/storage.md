@@ -6,8 +6,9 @@
 
 ChakraDB's storage is **log-structured** and **Arrow-native**. Writes land in
 memory and are sealed into immutable columnar parts; reads see a merged view
-across the tiers. This chapter is the shape of the store; the algorithms that run
-over it — visibility, merge, pruning — get their own chapters in Part III.
+across the tiers. This chapter covers the store and the algorithms that run over
+it — the sorted-part key index, merge/compaction, zonemap pruning, and Bloom
+filters — each in its own section below.
 
 ## Three tiers
 
@@ -49,7 +50,7 @@ flowchart LR
 3. **Compaction — keeping scans fast.** Parts accumulate as writes flow. A
    background-free, caller-driven **compaction** merges parts, drops rows no live
    snapshot can see, and collapses version stamps — trading write amplification for
-   scan speed. See [Compaction](storage.md).
+   scan speed. See Compaction.
 
 > **The absorption point.** Fast writes create unmerged deltas that slow scans;
 > ChakraDB pays that debt in **compaction**, not in the read path, and applies
@@ -80,7 +81,7 @@ flowchart TB
 - **Bloom filter** — answers "could key *k* be in this part?" with no disk touch,
   so a point lookup skips parts that certainly lack the key.
 - **Zonemaps** — per-column `(min, max)`. A `WHERE` range or a graph adjacency scan
-  skips any part whose range cannot overlap. This is [zonemap pruning](storage.md).
+  skips any part whose range cannot overlap. This is zonemap pruning.
 - **Version stamps** — the `created`/`deleted` CSN per row (or one uniform stamp
   when the whole part shares one), the input to [MVCC visibility](mvcc.md).
 - **Deletion vector** — which ordinals are tombstoned, so a scan skips deleted rows
@@ -88,7 +89,7 @@ flowchart TB
 - **The sorted key run** *is* the index: because the part is sorted by key, the
   ordinal position is the row offset, and a lookup is a Bloom probe plus a binary
   search — no separate key→location map exists. See
-  [The Primary-Key Index](storage.md).
+  The Primary-Key Index.
 
 ## Arbitrary schemas, any-type keys
 
@@ -407,7 +408,7 @@ out of ALGORITHM 11.
 > disjoint and ordered. A key range `[lo, hi)` overlaps only the contiguous run of
 > parts whose intervals intersect it — a count that grows with `hi − lo`, not with
 > the number of parts. Every other part is excluded by ALG 11 (lines 2–6). Measured:
-> a needle range scan stays ~1 ms as the table grows 100× (ClickBench Q13, Part IX).
+> a needle range scan stays ~1 ms as the table grows 100× (ClickBench Q13).
 > ∎
 
 ## The correctness guarantee, restated
@@ -454,7 +455,7 @@ float, boolean, and decimal keys get a deterministic reduction.
 
 ## Its place in the funnel
 
-The Bloom test is the second filter in the [point-lookup funnel](storage.md),
+The Bloom test is the second filter in the point-lookup funnel,
 after the min/max bounds and before the binary search:
 
 ```mermaid
@@ -476,7 +477,7 @@ key is dropped before any of its data is examined.
 
 The filter trades a small, fixed number of bits per key for a low false-positive
 rate. In ChakraDB it is part of the ~1.25 B/row resident index budget
-([Proposition 1](storage.md)): the Bloom bits, the min/max bounds, the version
+(Proposition 1): the Bloom bits, the min/max bounds, the version
 stamps, and the deletion vector together stay flat with table size, which is what
 lets the engine keep data on disk and the index in memory.
 

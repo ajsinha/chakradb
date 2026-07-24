@@ -162,7 +162,7 @@ because when a trade-off arises, these are how it is resolved.
 
 5. **Publish the harness, not just the number.** No neutral benchmark measures the
    concurrency axis ChakraDB competes on, so every performance claim in this book
-   ships with the code that produced it (Part IX). A number without a reproducible
+   ships with the code that produced it. A number without a reproducible
    source is a hypothesis, not a measurement.
 
 ## The cost model

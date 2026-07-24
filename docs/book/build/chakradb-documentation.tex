@@ -252,16 +252,15 @@ audiences at once, and it is organized so each can find its level:
 \tightlist
 \item
   \textbf{Users} who want to build applications --- start at Part V
-  (\emph{Getting Started}) and Part VI (\emph{Developer Guide \&
-  Tutorials}).
+  (\emph{Getting Started}) and the Part VI (\emph{Case Studies}).
 \item
   \textbf{Architects} evaluating the engine --- read Part I
-  (\emph{Introduction}), Part II (\emph{Architecture}), and Part IX
-  (\emph{Comparative Studies}).
+  (\emph{Introduction}), Part II (\emph{The Engine}), and Part VII
+  (\emph{Perspective}).
 \item
   \textbf{Contributors and the curious} who want to know \emph{how} it
-  works down to the algorithm --- Part III (\emph{Algorithms}) is the
-  deep end.
+  works down to the algorithm --- Parts II--IV carry the pseudocode and
+  complexity.
 \end{itemize}
 
 \section{How the book is organized}\label{how-the-book-is-organized}
@@ -281,23 +280,20 @@ What it covers
 \endlastfoot
 I --- Introduction & What ChakraDB is, the problem it solves, its design
 principles and cost model. \\
-II --- Architecture & The engine's structure: storage, MVCC, durability,
-compaction, the query router. \\
-III --- Algorithms & Each core algorithm in detail, with pseudocode and
-complexity. \\
-IV --- Graph & The property-graph layer: adjacency, CSR snapshots, and
-graph algorithms. \\
-V --- Getting Started & Install, first database, Python, first graph. \\
-VI --- Developer Guide & SQL, types, constraints, transactions, COPY,
-backup, observability, tutorials. \\
-VII --- Operations & Durability tuning, limits, monitoring, disaster
-recovery. \\
-VIII --- Case Studies & Worked end-to-end applications. \\
-IX --- Comparative Studies & Head-to-head with DuckDB, SQLite, Neo4j,
-PostgreSQL, with methodology. \\
-X --- Reference & The Rust and Python APIs, configuration, errors, file
-formats. \\
-Appendices & Glossary, design-decision log, bibliography. \\
+II --- The Engine & Storage (parts, index, compaction, pruning), MVCC \&
+transactions, durability, the HTAP query router, and exact types --- the
+design \emph{and} the algorithms, together. \\
+III --- The Graph Engine & The property-graph layer: clustered
+adjacency, CSR snapshots, and the full graph-algorithm library. \\
+IV --- Reactive & The change stream (CDC), materialized workers and the
+registry, and the sink transports --- how applications react to
+committed data. \\
+V --- Getting Started & Install, first database, Python, and a first
+graph --- Rust and Python. \\
+VI --- Case Studies & Worked end-to-end applications: real-time AML,
+counterparty \& market risk, recommendations, and fraud. \\
+VII --- Perspective & Head-to-head with the alternatives, and where
+ChakraDB fits. \\
 \end{longtable}
 
 \section{Conventions}\label{conventions}
@@ -550,9 +546,9 @@ resolved.
 \item
   \textbf{Publish the harness, not just the number.} No neutral
   benchmark measures the concurrency axis ChakraDB competes on, so every
-  performance claim in this book ships with the code that produced it
-  (Part IX). A number without a reproducible source is a hypothesis, not
-  a measurement.
+  performance claim in this book ships with the code that produced it. A
+  number without a reproducible source is a hypothesis, not a
+  measurement.
 \end{enumerate}
 
 \section{The cost model}\label{the-cost-model}
@@ -731,9 +727,10 @@ contend on. The following chapters trace both paths in detail.
 
 ChakraDB's storage is \textbf{log-structured} and \textbf{Arrow-native}.
 Writes land in memory and are sealed into immutable columnar parts;
-reads see a merged view across the tiers. This chapter is the shape of
-the store; the algorithms that run over it --- visibility, merge,
-pruning --- get their own chapters in Part III.
+reads see a merged view across the tiers. This chapter covers the store
+and the algorithms that run over it --- the sorted-part key index,
+merge/compaction, zonemap pruning, and Bloom filters --- each in its own
+section below.
 
 \section{Three tiers}\label{three-tiers}
 
@@ -758,8 +755,7 @@ pruning --- get their own chapters in Part III.
   \textbf{Compaction --- keeping scans fast.} Parts accumulate as writes
   flow. A background-free, caller-driven \textbf{compaction} merges
   parts, drops rows no live snapshot can see, and collapses version
-  stamps --- trading write amplification for scan speed. See
-  \href{storage.md}{Compaction}.
+  stamps --- trading write amplification for scan speed. See Compaction.
 \end{enumerate}
 
 \begin{quote}
@@ -787,7 +783,7 @@ that each part keeps a small \textbf{index resident in memory} --- about
 \item
   \textbf{Zonemaps} --- per-column \texttt{(min,\ max)}. A
   \texttt{WHERE} range or a graph adjacency scan skips any part whose
-  range cannot overlap. This is \href{storage.md}{zonemap pruning}.
+  range cannot overlap. This is zonemap pruning.
 \item
   \textbf{Version stamps} --- the \texttt{created}/\texttt{deleted} CSN
   per row (or one uniform stamp when the whole part shares one), the
@@ -799,7 +795,7 @@ that each part keeps a small \textbf{index resident in memory} --- about
   \textbf{The sorted key run} \emph{is} the index: because the part is
   sorted by key, the ordinal position is the row offset, and a lookup is
   a Bloom probe plus a binary search --- no separate key→location map
-  exists. See \href{storage.md}{The Primary-Key Index}.
+  exists. See The Primary-Key Index.
 \end{itemize}
 
 \section{Arbitrary schemas, any-type
@@ -1176,7 +1172,7 @@ overlaps only the contiguous run of parts whose intervals intersect it
 --- a count that grows with \texttt{hi\ −\ lo}, not with the number of
 parts. Every other part is excluded by ALG 11 (lines 2--6). Measured: a
 needle range scan stays \textasciitilde1 ms as the table grows 100×
-(ClickBench Q13, Part IX). ∎
+(ClickBench Q13). ∎
 \end{quote}
 
 \section{The correctness guarantee,
@@ -1242,9 +1238,8 @@ deterministic reduction.
 
 \section{Its place in the funnel}\label{its-place-in-the-funnel}
 
-The Bloom test is the second filter in the
-\href{storage.md}{point-lookup funnel}, after the min/max bounds and
-before the binary search:
+The Bloom test is the second filter in the point-lookup funnel, after
+the min/max bounds and before the binary search:
 
 \begin{Shaded}
 \begin{Highlighting}[]
@@ -1268,10 +1263,10 @@ examined.
 
 The filter trades a small, fixed number of bits per key for a low
 false-positive rate. In ChakraDB it is part of the \textasciitilde1.25
-B/row resident index budget (\href{storage.md}{Proposition 1}): the
-Bloom bits, the min/max bounds, the version stamps, and the deletion
-vector together stay flat with table size, which is what lets the engine
-keep data on disk and the index in memory.
+B/row resident index budget (Proposition 1): the Bloom bits, the min/max
+bounds, the version stamps, and the deletion vector together stay flat
+with table size, which is what lets the engine keep data on disk and the
+index in memory.
 
 \begin{quote}
 \textbf{Proposition 11 (No false negatives ⇒ lookups are correct).} The
@@ -1301,9 +1296,8 @@ while analytical scans run on the same snapshot --- the HTAP split the
 \epigraph{Time is what keeps everything from happening at once.}{--- Ray Cummings}
 
 Multi-Version Concurrency Control is the reason readers never block
-writers. This chapter is the \emph{model}; the \href{mvcc.md}{visibility
-algorithm} and the \href{mvcc.md}{GC watermark} get the full treatment
-in Part III.
+writers. This chapter is the \emph{model}; the visibility algorithm and
+the GC watermark get the full treatment in Part III.
 
 \section{The commit sequence number
 (CSN)}\label{the-commit-sequence-number-csn}
@@ -1403,8 +1397,8 @@ tracks a \textbf{live-snapshot registry}: a long-running reader (a query
 or a transaction) \emph{pins} its snapshot, and compaction's reclamation
 horizon is held back to the oldest pinned snapshot. A reader on an old
 snapshot keeps its view even as newer writes are compacted away. The
-full mechanism --- and why it is correct under concurrency --- is in
-\href{mvcc.md}{The GC Watermark}.
+full mechanism --- and why it is correct under concurrency --- is in The
+GC Watermark.
 
 \section{Durability of the clock}\label{durability-of-the-clock}
 
@@ -1688,10 +1682,9 @@ snapshot, plus a change-set to replay on commit:
 \section{Snapshot isolation}\label{snapshot-isolation}
 
 The transaction pins its \texttt{BEGIN} snapshot (which also holds the
-\href{mvcc.md}{GC watermark} back, so the versions it may read are not
-compacted away). Every statement in the transaction reads that one
-consistent instant, extended by its own writes. Other connections'
-commits are invisible.
+GC watermark back, so the versions it may read are not compacted away).
+Every statement in the transaction reads that one consistent instant,
+extended by its own writes. Other connections' commits are invisible.
 
 \section{First-committer-wins}\label{first-committer-wins}
 
@@ -1747,8 +1740,8 @@ A durable ChakraDB (\texttt{Storage}) guarantees that an acknowledged
 write survives a crash. The mechanism is a classic \textbf{write-ahead
 log} with \textbf{group commit}, a \textbf{manifest} for the catalog and
 part set, and a \textbf{recovery} pass that replays the log. This
-chapter is the shape; the \href{durability.md}{WAL algorithm} and
-\href{durability.md}{recovery} chapters have the byte-level detail.
+chapter covers all three --- the design, then the WAL and recovery
+algorithms with their byte-level detail --- in the sections below.
 
 \section{Write-ahead logging}\label{write-ahead-logging}
 
@@ -1801,7 +1794,7 @@ and each table's schema in the \textbf{manifest}, and advances a
 \texttt{checkpoint\_csn} --- after which the log \emph{before} that
 point is reclaimable. Checkpointing is incremental: unchanged parts are
 skipped, and parts that only gained tombstones get just those appended.
-See \href{durability.md}{Checkpointing}.
+See Checkpointing.
 
 \begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-17.pdf}\end{center}
 
@@ -1997,7 +1990,7 @@ the pre-transaction value or the post-transaction value
 \end{quote}
 
 Recovery --- how the log is replayed to reconstruct the acknowledged
-state --- is \href{durability.md}{the next chapter}.
+state --- is the next section.
 
 \section{Crash Recovery}\label{crash-recovery}
 
@@ -2094,15 +2087,15 @@ state}\label{why-it-recovers-the-exact-acknowledged-state}
 database contains every acknowledged write and no unacknowledged one.
 
 \emph{Proof sketch.} An \emph{acknowledged} write is, by the durability
-mode (\href{durability.md}{ALGORITHM 5}), one whose frame and covering
-\texttt{fsync} completed --- so its frame is intact and precedes the
-torn tail, and it is replayed (or already in a part below the
-checkpoint). An \emph{unacknowledged} write either never reached the log
-or sits in the torn tail; the CRC rejects the latter, so it is dropped.
-Hence the recovered set is exactly the acknowledged set. This is
-stress-tested by tens of thousands of randomized crash trials across all
-durability modes and schemas (\texttt{crash\_consistency},
-\texttt{durable\_sql\_crash}). ∎
+mode (ALGORITHM 5), one whose frame and covering \texttt{fsync}
+completed --- so its frame is intact and precedes the torn tail, and it
+is replayed (or already in a part below the checkpoint). An
+\emph{unacknowledged} write either never reached the log or sits in the
+torn tail; the CRC rejects the latter, so it is dropped. Hence the
+recovered set is exactly the acknowledged set. This is stress-tested by
+tens of thousands of randomized crash trials across all durability modes
+and schemas (\texttt{crash\_consistency}, \texttt{durable\_sql\_crash}).
+∎
 \end{quote}
 
 \section{Clock safety}\label{clock-safety}
@@ -2623,7 +2616,7 @@ engine wants.
   scan that \href{../engine/storage.md}{zonemap pruning} answers by
   touching only the parts holding \texttt{src\ =\ X}. No secondary
   index; the primary-key sort \emph{is} the adjacency index. See
-  \href{model.md}{Clustered Adjacency}.
+  Clustered Adjacency.
 \item
   \textbf{Live graph analytics.} A whole-graph algorithm builds its
   working set from \textbf{one MVCC snapshot}. Writers keep adding
@@ -2680,8 +2673,7 @@ builds the layer up: modeling, adjacency, CSR, and the algorithms.
 (\texttt{src/graph.rs}, \texttt{tests/graph.rs}) --- directed edges,
 adjacency, CSR views, and the core algorithm set. Node ids are currently
 \texttt{u32}; a native composite key (on the roadmap) will lift that and
-remove the key-encoding step. See \href{model.md}{Modeling a Property
-Graph}.
+remove the key-encoding step. See Modeling a Property Graph.
 \end{quote}
 
 \section{Modeling a Property Graph}\label{modeling-a-property-graph}
@@ -2776,7 +2768,7 @@ modeled}{What's not modeled}}\label{whats-not-modeled}
   ceiling.
 \end{itemize}
 
-The next chapters --- \href{model.md}{Clustered Adjacency} and
+The sections below --- clustered adjacency, and then
 \href{snapshot.md}{The CSR Snapshot} --- show why this simple mapping
 traverses fast.
 
@@ -2826,9 +2818,9 @@ Only Part B can hold \texttt{src\ =\ 500}, so only Part B is scanned.
 This is the same \href{../engine/storage.md}{zonemap part pruning} that
 accelerates a selective SQL \texttt{WHERE} --- reused as the graph
 adjacency index. In the ClickBench benchmark, a key-range scan of this
-shape stays effectively \textbf{O(1) as the table grows 100×} (Part IX).
-For a graph, that means neighbor lookup cost tracks the node's degree,
-not the graph's size.
+shape stays effectively \textbf{O(1) as the table grows 100×} For a
+graph, that means neighbor lookup cost tracks the node's degree, not the
+graph's size.
 
 The primitive in the engine is:
 
@@ -3640,7 +3632,7 @@ Run the test suite the same way:
 transactional workload and the graph engine; it has no heavy
 dependencies and compiles in seconds. DataFusion is bought in only when
 you want the analytical half of HTAP. Every algorithm in
-\href{../engine/overview.md}{Part IV --- Graph} is available in
+\href{../graph/model.md}{the Graph Engine part} is available in
 \emph{both} profiles.
 \end{quote}
 
@@ -3669,8 +3661,7 @@ Then, in code:
 \end{Shaded}
 
 For a durable, on-disk database, open a \texttt{Storage} over a
-directory instead --- see \href{getting-started.md}{Your First Database
-(Rust)}.
+directory instead --- see Your First Database (Rust).
 
 \section{Building the Python
 bindings}\label{building-the-python-bindings}
@@ -3696,9 +3687,8 @@ Once built, the package is importable anywhere:
 \end{Highlighting}
 \end{Shaded}
 
-The Python driver implements \href{getting-started.md}{PEP 249 (DB-API
-2.0)} and exposes the graph engine via \texttt{conn.graph(name)} --- see
-\href{getting-started.md}{A Graph in Five Minutes}.
+The Python driver implements PEP 249 (DB-API 2.0) and exposes the graph
+engine via \texttt{conn.graph(name)} --- see A Graph in Five Minutes.
 
 \section{Running the examples}\label{running-the-examples}
 
@@ -3758,8 +3748,8 @@ The smallest possible program:
 \end{Shaded}
 
 \texttt{SqlEngine::run} executes a statement (DDL or DML) and returns an
-\href{getting-started.md}{\texttt{Outcome}}; \texttt{SqlEngine::query}
-is a convenience that returns rows already rendered as
+\texttt{Outcome}; \texttt{SqlEngine::query} is a convenience that
+returns rows already rendered as
 \texttt{Vec\textless{}Vec\textless{}String\textgreater{}\textgreater{}}.
 
 \section{Types and constraints are
@@ -3834,22 +3824,18 @@ the engine recovers automatically on the next open --- see
 \begin{itemize}
 \tightlist
 \item
-  \href{getting-started.md}{Python in Five Minutes} --- the same engine
-  from Python.
+  Python in Five Minutes --- the same engine from Python.
 \item
-  \href{getting-started.md}{A Graph in Five Minutes} --- treat your
-  tables as a graph.
+  A Graph in Five Minutes --- treat your tables as a graph.
 \item
-  \href{getting-started.md}{The SQL Reference} --- the full statement
-  surface.
+  The SQL Reference --- the full statement surface.
 \end{itemize}
 
 \section{Python in Five Minutes}\label{python-in-five-minutes}
 
 The Python bindings wrap the exact same engine as the Rust core. The SQL
-surface is exposed through a standard \href{getting-started.md}{PEP 249
-(DB-API 2.0)} driver, so if you have used \texttt{sqlite3} you already
-know the shape of it.
+surface is exposed through a standard PEP 249 (DB-API 2.0) driver, so if
+you have used \texttt{sqlite3} you already know the shape of it.
 
 \section{Connect, execute, fetch}\label{connect-execute-fetch}
 
@@ -3876,8 +3862,8 @@ know the shape of it.
 
 \texttt{connect}, \texttt{Connection.execute},
 \texttt{Cursor.fetchone/fetchmany/fetchall}, \texttt{commit},
-\texttt{rollback}, and the full \href{getting-started.md}{exception
-hierarchy} (\texttt{IntegrityError}, \texttt{ProgrammingError},
+\texttt{rollback}, and the full exception hierarchy
+(\texttt{IntegrityError}, \texttt{ProgrammingError},
 \texttt{OperationalError}, \ldots) all behave exactly as PEP 249
 specifies.
 
@@ -3925,9 +3911,8 @@ ordinary transactional rows:
 \end{Shaded}
 
 Every algorithm returns plain Python \texttt{dict}/\texttt{list} values
-keyed by node id. The full catalogue is in \href{getting-started.md}{A
-Graph in Five Minutes} and \href{../graph/algorithms.md}{Graph
-Algorithms}.
+keyed by node id. The full catalogue is in A Graph in Five Minutes and
+\href{../graph/algorithms.md}{Graph Algorithms}.
 
 \section{A complete application}\label{a-complete-application}
 
@@ -5414,8 +5399,7 @@ rowgroup stats, ChakraDB via zonemaps); a needle range stays
 
 The full harness (both engines, identical CSV) is
 \texttt{src/bin/clickbench.rs} + \texttt{scripts/clickbench\_duckdb.sh};
-the numbers and method are in \href{comparisons.md}{Benchmark
-Methodology}.
+the numbers and method are in Benchmark Methodology.
 
 \section{Feature and model
 comparison}\label{feature-and-model-comparison}

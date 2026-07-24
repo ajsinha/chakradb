@@ -35,7 +35,7 @@ cargo test --features datafusion          # + analytical path
 > **Why two profiles?** The interpreter path is what powers the transactional
 > workload and the graph engine; it has no heavy dependencies and compiles in
 > seconds. DataFusion is bought in only when you want the analytical half of
-> HTAP. Every algorithm in [Part IV — Graph](../engine/overview.md) is available
+> HTAP. Every algorithm in [the Graph Engine part](../graph/model.md) is available
 > in *both* profiles.
 
 ## Adding ChakraDB to a Rust project
@@ -58,7 +58,7 @@ sql.run("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")?;
 ```
 
 For a durable, on-disk database, open a `Storage` over a directory instead — see
-[Your First Database (Rust)](getting-started.md).
+Your First Database (Rust).
 
 ## Building the Python bindings
 
@@ -79,9 +79,9 @@ import chakradb
 conn = chakradb.connect(":memory:")
 ```
 
-The Python driver implements [PEP 249 (DB-API 2.0)](getting-started.md)
+The Python driver implements PEP 249 (DB-API 2.0)
 and exposes the graph engine via `conn.graph(name)` — see
-[A Graph in Five Minutes](getting-started.md).
+A Graph in Five Minutes.
 
 ## Running the examples
 
@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `SqlEngine::run` executes a statement (DDL or DML) and returns an
-[`Outcome`](getting-started.md); `SqlEngine::query` is a convenience that
+`Outcome`; `SqlEngine::query` is a convenience that
 returns rows already rendered as `Vec<Vec<String>>`.
 
 ## Types and constraints are enforced
@@ -198,15 +198,15 @@ engine recovers automatically on the next open — see
 
 ## Where to go next
 
-- [Python in Five Minutes](getting-started.md) — the same engine from Python.
-- [A Graph in Five Minutes](getting-started.md) — treat your tables as a graph.
-- [The SQL Reference](getting-started.md) — the full statement surface.
+- Python in Five Minutes — the same engine from Python.
+- A Graph in Five Minutes — treat your tables as a graph.
+- The SQL Reference — the full statement surface.
 
 ## Python in Five Minutes
 
 
 The Python bindings wrap the exact same engine as the Rust core. The SQL surface
-is exposed through a standard [PEP 249 (DB-API 2.0)](getting-started.md)
+is exposed through a standard PEP 249 (DB-API 2.0)
 driver, so if you have used `sqlite3` you already know the shape of it.
 
 ## Connect, execute, fetch
@@ -231,7 +231,7 @@ for row in conn.execute("SELECT id, owner, balance FROM accounts ORDER BY id"):
 ```
 
 `connect`, `Connection.execute`, `Cursor.fetchone/fetchmany/fetchall`,
-`commit`, `rollback`, and the full [exception hierarchy](getting-started.md)
+`commit`, `rollback`, and the full exception hierarchy
 (`IntegrityError`, `ProgrammingError`, `OperationalError`, …) all behave exactly
 as PEP 249 specifies.
 
@@ -272,7 +272,7 @@ print(view.personalized_pagerank(seeds=[1]))
 ```
 
 Every algorithm returns plain Python `dict`/`list` values keyed by node id. The
-full catalogue is in [A Graph in Five Minutes](getting-started.md) and
+full catalogue is in A Graph in Five Minutes and
 [Graph Algorithms](../graph/algorithms.md).
 
 ## A complete application

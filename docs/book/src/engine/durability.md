@@ -7,8 +7,8 @@
 A durable ChakraDB (`Storage`) guarantees that an acknowledged write survives a
 crash. The mechanism is a classic **write-ahead log** with **group commit**, a
 **manifest** for the catalog and part set, and a **recovery** pass that replays the
-log. This chapter is the shape; the [WAL algorithm](durability.md) and
-[recovery](durability.md) chapters have the byte-level detail.
+log. This chapter covers all three — the design, then the WAL and recovery
+algorithms with their byte-level detail — in the sections below.
 
 ## Write-ahead logging
 
@@ -56,7 +56,7 @@ state durable in parts, records the live part set and each table's schema in the
 **manifest**, and advances a `checkpoint_csn` — after which the log *before* that
 point is reclaimable. Checkpointing is incremental: unchanged parts are skipped,
 and parts that only gained tombstones get just those appended. See
-[Checkpointing](durability.md).
+Checkpointing.
 
 ```mermaid
 flowchart LR
@@ -222,8 +222,8 @@ none of it.
 > the recovered row count is only ever the pre-transaction value or the
 > post-transaction value (`torn_commit_record_is_all_or_nothing`). ∎
 
-Recovery — how the log is replayed to reconstruct the acknowledged state — is
-[the next chapter](durability.md).
+Recovery — how the log is replayed to reconstruct the acknowledged state — is the
+next section.
 
 ## Crash Recovery
 
@@ -304,7 +304,7 @@ flowchart LR
 > every acknowledged write and no unacknowledged one.
 >
 > *Proof sketch.* An *acknowledged* write is, by the durability mode
-> ([ALGORITHM 5](durability.md)), one whose frame and covering `fsync` completed — so its
+> (ALGORITHM 5), one whose frame and covering `fsync` completed — so its
 > frame is intact and precedes the torn tail, and it is replayed (or already in a
 > part below the checkpoint). An *unacknowledged* write either never reached the log
 > or sits in the torn tail; the CRC rejects the latter, so it is dropped. Hence the
