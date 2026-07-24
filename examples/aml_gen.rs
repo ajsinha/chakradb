@@ -23,8 +23,10 @@
 //!   structuring collector 900000; smurfs 900001-900012; layering ring
 //!   910000-910003; known-bad distributor 920000; mules 920001-920020.
 
-use chakradb::{Database, PosixIo, SqlEngine};
+use chakradb::cdc::{Cdc, CdcBackend, JsonlSink};
+use chakradb::sql::SqlBackend;
 use chakradb::storage::{Storage, StorageConfig};
+use chakradb::{Database, PosixIo, SqlEngine};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,6 +59,7 @@ struct Args {
     db: String,
     count: u64,
     seed: u64,
+    sink: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -64,6 +67,7 @@ fn parse_args() -> Args {
         db: ":memory:".to_string(),
         count: 200_000,
         seed: 42,
+        sink: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -73,8 +77,9 @@ fn parse_args() -> Args {
                 args.count = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.count)
             }
             "--seed" => args.seed = it.next().and_then(|v| v.parse().ok()).unwrap_or(args.seed),
+            "--sink" => args.sink = it.next(),
             "-h" | "--help" => {
-                println!("usage: aml_gen [--db PATH] [--count N] [--seed S]");
+                println!("usage: aml_gen [--db PATH] [--count N] [--seed S] [--sink FILE.jsonl]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown flag: {other}"),
@@ -86,13 +91,20 @@ fn parse_args() -> Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
 
-    let engine = if args.db.is_empty() || args.db == ":memory:" {
-        SqlEngine::new(Arc::new(Database::new()))
+    // Wrap the backend in CDC so, with `--sink`, every committed transaction is
+    // also appended to a JSON-lines change log a separate worker can tail.
+    let cdc = Cdc::new();
+    if let Some(sink) = &args.sink {
+        cdc.add_sink(JsonlSink::create(sink)?);
+    }
+    let backend: Arc<dyn SqlBackend> = if args.db.is_empty() || args.db == ":memory:" {
+        Arc::new(Database::new())
     } else {
         std::fs::create_dir_all(&args.db)?;
         let io = PosixIo::open(&args.db)?;
-        SqlEngine::durable(Arc::new(Storage::open(Arc::new(io), StorageConfig::default())?))
+        Arc::new(Storage::open(Arc::new(io), StorageConfig::default())?)
     };
+    let engine = SqlEngine::with_backend(CdcBackend::wrap(backend, cdc.clone()));
 
     engine.run(
         "CREATE TABLE transactions (

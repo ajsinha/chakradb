@@ -89,6 +89,103 @@ impl Change {
             .zip(vals.iter())
             .collect()
     }
+
+    /// Serialize the change to a single JSON object — the wire format for an
+    /// external transport (a JSON-lines file, Kafka, NATS). Shape:
+    /// `{"table":…,"op":"insert","csn":N,"old":null,"new":{col:val,…}}`.
+    pub fn to_json(&self) -> String {
+        let obj = |vals: &Option<Vec<Value>>| match vals {
+            None => "null".to_string(),
+            Some(v) => {
+                let fields: Vec<String> = self
+                    .columns
+                    .iter()
+                    .zip(v)
+                    .map(|(c, val)| format!("{}:{}", json_string(c), json_value(val)))
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            }
+        };
+        format!(
+            r#"{{"table":{},"op":{},"csn":{},"old":{},"new":{}}}"#,
+            json_string(&self.table),
+            json_string(self.op.as_str()),
+            self.csn,
+            obj(&self.old),
+            obj(&self.new)
+        )
+    }
+}
+
+/// Encode one `Value` as a JSON literal.
+fn json_value(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) if f.is_finite() => format!("{f}"),
+        Value::Float(_) => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Text(s) => json_string(s),
+        Value::Decimal(m, scale) => format!("{:.*}", *scale as usize, *m as f64 / 10f64.powi(*scale as i32)),
+    }
+}
+
+/// Encode a string as a JSON string literal (minimal escaping).
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A [`ChangeSink`] that appends each committed change as one JSON line to a
+/// file — a broker-less **cross-process** change log. A separate worker process
+/// tails the file and consumes the stream, exactly as it would a Kafka topic.
+/// (For Kafka, implement `ChangeSink::emit` to `produce` each `change.to_json()`
+/// keyed by the row's partition key — the same ~15 lines against a broker.)
+pub struct JsonlSink {
+    out: Mutex<std::io::BufWriter<std::fs::File>>,
+}
+
+impl std::fmt::Debug for JsonlSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonlSink").finish_non_exhaustive()
+    }
+}
+
+impl JsonlSink {
+    /// Open (creating/appending) a JSON-lines change log at `path`.
+    pub fn create(path: impl AsRef<std::path::Path>) -> std::io::Result<Arc<Self>> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Arc::new(JsonlSink {
+            out: Mutex::new(std::io::BufWriter::new(file)),
+        }))
+    }
+}
+
+impl ChangeSink for JsonlSink {
+    fn emit(&self, batch: &[Change]) {
+        use std::io::Write;
+        let mut w = self.out.lock().unwrap();
+        for change in batch {
+            let _ = writeln!(w, "{}", change.to_json());
+        }
+        let _ = w.flush(); // flush per commit so a tailing consumer sees it promptly
+    }
 }
 
 /// A transport for published change batches. The in-process channel is the

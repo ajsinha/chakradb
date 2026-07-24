@@ -206,6 +206,35 @@ fn worker_registry_is_observable_and_stoppable_by_name() {
 }
 
 #[test]
+fn jsonl_sink_writes_a_cross_process_change_log() {
+    use chakradb::cdc::JsonlSink;
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("chakradb_cdc_{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    let db = Arc::new(Database::new());
+    let cdc = Cdc::new();
+    cdc.add_sink(JsonlSink::create(&path).unwrap());
+    let engine = SqlEngine::with_backend(CdcBackend::wrap(db, cdc.clone()));
+
+    engine
+        .run("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, amt DECIMAL(6,2))")
+        .unwrap();
+    engine.run("INSERT INTO t VALUES (1, 'ada', 9.50)").unwrap();
+    engine.run("UPDATE t SET amt = 12.25 WHERE id = 1").unwrap();
+
+    let log = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "one JSON line per committed change");
+    assert!(lines[0].contains(r#""op":"insert""#));
+    assert!(lines[0].contains(r#""name":"ada""#));
+    assert!(lines[0].contains(r#""amt":9.50"#));
+    assert!(lines[1].contains(r#""op":"update""#));
+    assert!(lines[1].contains(r#""amt":12.25"#) && lines[1].contains(r#""old""#));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn durable_backend_publishes_committed_writes() {
     let io = Arc::new(MemIo::new());
     let storage = Arc::new(Storage::open(io, StorageConfig::default()).unwrap());

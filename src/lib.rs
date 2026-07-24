@@ -98,8 +98,8 @@ pub use csn::{Csn, CsnGenerator, Snapshot, SnapshotPin};
 pub use database::Database;
 pub use graph::{ClearingResult, Graph, GraphView, NodeId};
 pub use cdc::{
-    Cdc, CdcBackend, Change, ChangeOp, ChangeSink, ChangeStream, Materialized, MaterializedWorker,
-    Recv, WorkerStatus,
+    Cdc, CdcBackend, Change, ChangeOp, ChangeSink, ChangeStream, JsonlSink, Materialized,
+    MaterializedWorker, Recv, WorkerStatus,
 };
 pub use durability::Durability;
 pub use error::{Error, Result};
