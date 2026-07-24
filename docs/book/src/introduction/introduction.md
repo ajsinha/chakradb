@@ -99,6 +99,20 @@ the algorithm's input format). The result is a client experience where BFS, shor
 path, PageRank, connected components, and triangle counting are one method call
 away, over data you are still writing to.
 
+### …and reactive
+
+A passive database answers questions. ChakraDB also **reacts**. A committed-change
+stream (CDC) publishes every `INSERT`/`UPDATE`/`DELETE` after it commits — off the
+write path, so the writer never waits — and **materialized workers** fold that
+stream into derived state: a running aggregate, a live graph projection, a set of
+alerts, maintained incrementally and queryable at any time. This closes the loop —
+*store → analyze → react → store* — on one consistent live dataset, in one process.
+It is what turns the three flagship applications built in Part VI — real-time
+[AML](../case-studies/aml.md), [counterparty & market risk](../case-studies/ccr.md),
+and [recommendations](../case-studies/reco.md) — from queries-you-run into
+systems-that-run, each reacting to 150+ million events per hour while ingest never
+pauses.
+
 ## The problem: why another database?
 
 The case for ChakraDB is a case against **fragmentation**. The modern data stack has
