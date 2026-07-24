@@ -210,6 +210,43 @@ fn k_core_and_similarity() {
 }
 
 #[test]
+fn recommend_and_adamic_adar_on_a_bipartite_graph() {
+    // A user↔item interaction graph (edges both ways). Users 1,2,3 all engage
+    // with items 100,101,102; user 4 engages with only 100,101.
+    let g = graph();
+    let mut edges = Vec::new();
+    for u in [1, 2, 3] {
+        for i in [100, 101, 102] {
+            edges.push((u, i, 1.0));
+            edges.push((i, u, 1.0));
+        }
+    }
+    for i in [100, 101] {
+        edges.push((4, i, 1.0));
+        edges.push((i, 4, 1.0));
+    }
+    // An unrelated item 200 touched only by an unrelated user 5.
+    edges.push((5, 200, 1.0));
+    edges.push((200, 5, 1.0));
+    g.add_edges(edges).unwrap();
+    let v = g.view().unwrap();
+
+    // Recommend for user 4: item 102 (what similar users share that 4 lacks) is
+    // reachable; 4's own items and 4 itself are excluded; the unrelated 200 isn't
+    // reachable from 4 at all.
+    let recs = v.recommend(4, 10);
+    let rec_ids: Vec<chakradb::NodeId> = recs.iter().map(|(n, _)| *n).collect();
+    assert!(rec_ids.contains(&102), "should recommend item 102, got {rec_ids:?}");
+    assert!(!rec_ids.contains(&100) && !rec_ids.contains(&101) && !rec_ids.contains(&4));
+    assert!(!rec_ids.contains(&200), "unreachable item is never recommended");
+
+    // Adamic–Adar item similarity: 100 and 102 share users {1,2,3} → positive;
+    // 100 and 200 share nobody → zero.
+    assert!(v.adamic_adar(100, 102) > 0.0);
+    assert_eq!(v.adamic_adar(100, 200), 0.0);
+}
+
+#[test]
 fn eisenberg_noe_default_cascade() {
     use std::collections::HashMap;
     // A liability chain: 1 owes 2 owes 3 (each 100). Node 1 has no external cash.

@@ -407,6 +407,15 @@ impl GraphView {
     fn jaccard_similarity(&self, a: NodeId, b: NodeId) -> f64 {
         self.inner.jaccard_similarity(a, b)
     }
+    /// Adamic–Adar link-prediction score: shared neighbours weighted by rarity.
+    fn adamic_adar(&self, a: NodeId, b: NodeId) -> f64 {
+        self.inner.adamic_adar(a, b)
+    }
+    /// Top-`k` nodes related to `seed` it is not already connected to, by
+    /// random-walk-with-restart (personalized PageRank). Returns `[(node, score)]`.
+    fn recommend(&self, seed: NodeId, k: usize) -> Vec<(NodeId, f64)> {
+        self.inner.recommend(seed, k)
+    }
 
     // --- Systemic risk ---
     /// Eisenberg–Noe clearing vector over a liability network (edge `i→j` weight

@@ -811,6 +811,61 @@ impl GraphView {
         inter / union
     }
 
+    /// The **Adamic–Adar** index of `a` and `b` — a link-prediction score that
+    /// weights each shared neighbour by its rarity: common neighbours that connect
+    /// to few others count for more. `AA(a,b) = Σ_{z ∈ N(a)∩N(b)} 1 / ln deg(z)`.
+    ///
+    /// On a bipartite interaction graph (users ↔ items, edges both ways) this is a
+    /// strong "you might also like" signal: two items are similar when the *same
+    /// niche users* engage with both, and a niche user (low degree) is far more
+    /// telling than someone who engages with everything.
+    pub fn adamic_adar(&self, a: NodeId, b: NodeId) -> f64 {
+        let (ai, bi) = match (self.index.get(&a), self.index.get(&b)) {
+            (Some(&ai), Some(&bi)) => (ai, bi),
+            _ => return 0.0,
+        };
+        let aset: std::collections::HashSet<u32> = self.neighbors(ai).iter().copied().collect();
+        let mut score = 0.0;
+        for &z in self.neighbors(bi) {
+            if aset.contains(&z) {
+                let deg = self.neighbors(z).len();
+                if deg > 1 {
+                    score += 1.0 / (deg as f64).ln();
+                }
+            }
+        }
+        score
+    }
+
+    /// Recommend the top-`k` nodes related to `seed` that it is **not already
+    /// connected to** — link prediction by random-walk-with-restart. Runs
+    /// personalized PageRank seeded at `seed`, drops `seed` and its direct
+    /// out-neighbours, and returns the highest-scoring remainder.
+    ///
+    /// On a user↔item graph, `recommend(user, k)` yields items the user has not
+    /// interacted with but that are reachable through similar users — collaborative
+    /// filtering as a graph walk.
+    pub fn recommend(&self, seed: NodeId, k: usize) -> Vec<(NodeId, f64)> {
+        let si = match self.index.get(&seed) {
+            Some(&i) => i,
+            None => return Vec::new(),
+        };
+        let mut exclude: std::collections::HashSet<NodeId> = self
+            .neighbors(si)
+            .iter()
+            .map(|&d| self.ids[d as usize])
+            .collect();
+        exclude.insert(seed);
+        let mut scored: Vec<(NodeId, f64)> = self
+            .personalized_pagerank(&[seed], 40, 0.85)
+            .into_iter()
+            .filter(|(n, s)| *s > 0.0 && !exclude.contains(n))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored.truncate(k);
+        scored
+    }
+
     /// The **Eisenberg–Noe clearing vector** of a financial liability network —
     /// the canonical model of default contagion / systemic risk.
     ///
