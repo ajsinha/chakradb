@@ -90,10 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let produced = Arc::new(AtomicU64::new(0));
 
-    // Register the AML worker as a MATERIALIZED derivation over the transactions
-    // change stream: it maintains its detectors incrementally, on its own thread,
-    // tracking a CSN cursor — the disciplined "worker" primitive.
-    let aml = cdc.materialize(Some("transactions"), Worker::new(engine.clone()));
+    // Register the AML worker as a named, MATERIALIZED derivation over the
+    // transactions change stream: it maintains its detectors incrementally on its
+    // own thread, tracking a CSN cursor — observable in the worker registry.
+    let aml = cdc.register("aml-detector", Some("transactions"), Worker::new(engine.clone()));
 
     // --- The generator: streams synthetic transactions at full speed -------
     let start = Instant::now();
@@ -165,7 +165,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate * 3600.0 / 1_000_000.0
     );
     println!("Worker: reacted to {seen} committed transactions via the change stream");
-    println!("        persisted {persisted} alerts to the `alerts` table\n");
+    println!("        persisted {persisted} alerts to the `alerts` table");
+    for w in cdc.workers() {
+        println!(
+            "Registry: worker '{}' on `{}` — cursor(CSN)={}, running={}",
+            w.name,
+            w.table.as_deref().unwrap_or("*"),
+            w.cursor,
+            w.running
+        );
+    }
+    println!();
 
     let flagged = aml.query(|w| w.alerts.clone());
     println!("── Accounts flagged (typology ensemble over the live stream) ──");

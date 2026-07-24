@@ -174,6 +174,38 @@ fn materialized_worker_maintains_a_running_aggregate() {
 }
 
 #[test]
+fn worker_registry_is_observable_and_stoppable_by_name() {
+    let db = Arc::new(Database::new());
+    let cdc = Cdc::new();
+    let engine = SqlEngine::with_backend(CdcBackend::wrap(db, cdc.clone()));
+    engine
+        .run("CREATE TABLE accounts (id INTEGER PRIMARY KEY, bal INTEGER)")
+        .unwrap();
+    engine
+        .run("CREATE TABLE orders (id INTEGER PRIMARY KEY, qty INTEGER)")
+        .unwrap();
+
+    let ledger = cdc.register("ledger", Some("accounts"), Ledger::default());
+    let _orders = cdc.register("order-count", Some("orders"), Ledger::default());
+
+    // Both workers are observable in the registry.
+    let names: Vec<String> = cdc.workers().into_iter().map(|w| w.name).collect();
+    assert!(names.contains(&"ledger".to_string()) && names.contains(&"order-count".to_string()));
+    assert!(cdc.worker("ledger").unwrap().running);
+
+    engine.run("INSERT INTO accounts VALUES (1, 100)").unwrap();
+    engine.run("INSERT INTO accounts VALUES (2, 50)").unwrap();
+    eventually(5, || ledger.query(|l| l.live_rows) == 2);
+    // The registry reflects the advancing cursor.
+    assert!(cdc.worker("ledger").unwrap().cursor > 0);
+
+    // Stop by name; the registry shows it as no longer running.
+    assert!(cdc.stop_worker("ledger"));
+    eventually(5, || !cdc.worker("ledger").unwrap().running);
+    assert!(!cdc.stop_worker("no-such-worker"));
+}
+
+#[test]
 fn durable_backend_publishes_committed_writes() {
     let io = Arc::new(MemIo::new());
     let storage = Arc::new(Storage::open(io, StorageConfig::default()).unwrap());

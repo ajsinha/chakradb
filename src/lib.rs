@@ -99,7 +99,7 @@ pub use database::Database;
 pub use graph::{ClearingResult, Graph, GraphView, NodeId};
 pub use cdc::{
     Cdc, CdcBackend, Change, ChangeOp, ChangeSink, ChangeStream, Materialized, MaterializedWorker,
-    Recv,
+    Recv, WorkerStatus,
 };
 pub use durability::Durability;
 pub use error::{Error, Result};

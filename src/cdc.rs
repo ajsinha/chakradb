@@ -107,12 +107,34 @@ struct Subscriber {
 /// A captured, not-yet-published change: `(table, op, old, new)`.
 type PendingChange = (String, ChangeOp, Option<Vec<Value>>, Option<Vec<Value>>);
 
+/// The observable status of a registered materialized worker.
+#[derive(Clone, Debug)]
+pub struct WorkerStatus {
+    pub name: String,
+    /// The table this worker derives from (`None` = all tables).
+    pub table: Option<String>,
+    /// The highest CSN it has consumed — its resume point.
+    pub cursor: Csn,
+    /// Whether it is still maintaining its derivation.
+    pub running: bool,
+}
+
+/// A worker registered by name for observability and stop-by-name.
+struct Registered {
+    name: String,
+    table: Option<String>,
+    cursor: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
 /// The change publisher. Hand the same `Arc<Cdc>` to [`CdcBackend::wrap`] and to
 /// [`Cdc::subscribe`]; the backend publishes, subscribers receive.
 #[derive(Default)]
 pub struct Cdc {
     subs: RwLock<Vec<Subscriber>>,
     sinks: RwLock<Vec<Arc<dyn ChangeSink>>>,
+    registry: RwLock<Vec<Registered>>,
 }
 
 impl std::fmt::Debug for Cdc {
@@ -161,6 +183,63 @@ impl Cdc {
         worker: W,
     ) -> Materialized<W> {
         Materialized::spawn(self.subscribe(table), worker)
+    }
+
+    /// Like [`materialize`](Cdc::materialize), but **named and tracked** in the
+    /// registry, so the worker is observable ([`workers`](Cdc::workers)) and can
+    /// be stopped by name ([`stop_worker`](Cdc::stop_worker)). Seed the worker's
+    /// initial state from a snapshot *before* registering to resume/rebuild; the
+    /// [`cursor`](Materialized::cursor) then tracks how far the live stream has
+    /// advanced.
+    pub fn register<W: MaterializedWorker>(
+        &self,
+        name: &str,
+        table: Option<&str>,
+        worker: W,
+    ) -> Materialized<W> {
+        let m = Materialized::spawn(self.subscribe(table), worker);
+        self.registry.write().unwrap().push(Registered {
+            name: name.to_string(),
+            table: table.map(str::to_string),
+            cursor: m.cursor.clone(),
+            stop: m.stop.clone(),
+            done: m.done.clone(),
+        });
+        m
+    }
+
+    /// A snapshot of every registered worker — name, source table, CSN cursor,
+    /// and whether it is still running. The observability surface for the worker
+    /// fleet.
+    pub fn workers(&self) -> Vec<WorkerStatus> {
+        self.registry
+            .read()
+            .unwrap()
+            .iter()
+            .map(|r| WorkerStatus {
+                name: r.name.clone(),
+                table: r.table.clone(),
+                cursor: r.cursor.load(Ordering::Acquire),
+                running: !r.stop.load(Ordering::Acquire) && !r.done.load(Ordering::Acquire),
+            })
+            .collect()
+    }
+
+    /// The status of one registered worker by name.
+    pub fn worker(&self, name: &str) -> Option<WorkerStatus> {
+        self.workers().into_iter().find(|w| w.name == name)
+    }
+
+    /// Stop a registered worker by name (idempotent). Returns `false` if no such
+    /// worker is registered.
+    pub fn stop_worker(&self, name: &str) -> bool {
+        match self.registry.read().unwrap().iter().find(|r| r.name == name) {
+            Some(r) => {
+                r.stop.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Publish a batch of changes (one commit's worth). Filters per subscriber by
@@ -293,6 +372,7 @@ pub struct Materialized<W> {
     state: Arc<Mutex<W>>,
     cursor: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -310,7 +390,8 @@ impl<W: MaterializedWorker> Materialized<W> {
         let state = Arc::new(Mutex::new(worker));
         let cursor = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let (s, c, st) = (state.clone(), cursor.clone(), stop.clone());
+        let done = Arc::new(AtomicBool::new(false));
+        let (s, c, st, dn) = (state.clone(), cursor.clone(), stop.clone(), done.clone());
         let handle = thread::spawn(move || {
             while !st.load(Ordering::Acquire) {
                 match stream.next_timeout(Duration::from_millis(100)) {
@@ -329,11 +410,13 @@ impl<W: MaterializedWorker> Materialized<W> {
                     Recv::Closed => break,
                 }
             }
+            dn.store(true, Ordering::Release); // publisher gone or stopped
         });
         Materialized {
             state,
             cursor,
             stop,
+            done,
             handle: Mutex::new(Some(handle)),
         }
     }
@@ -355,9 +438,10 @@ impl<W: MaterializedWorker> Materialized<W> {
         self.cursor.load(Ordering::Acquire)
     }
 
-    /// True while the background thread is still maintaining the derivation.
+    /// True while the background thread is still maintaining the derivation
+    /// (not stopped and the publisher is still live).
     pub fn is_running(&self) -> bool {
-        !self.stop.load(Ordering::Acquire) && self.handle.lock().unwrap().is_some()
+        !self.stop.load(Ordering::Acquire) && !self.done.load(Ordering::Acquire)
     }
 
     /// Stop maintaining the derivation and join the worker thread. Idempotent;
