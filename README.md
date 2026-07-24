@@ -7,18 +7,27 @@ block — with ACID/MVCC transactions, an open Arrow-native on-disk format, and 
 algorithms (PageRank, shortest paths, community & cycle detection, centralities)
 run over a consistent live snapshot of them.
 
-> ### 🚩 Flagship example — real-time Anti-Money-Laundering
-> A **complete AML system** ships in [`examples/`](examples/): it generates a
-> synthetic payment network, then detects structuring, layering (laundering
-> cycles), mule fan-out, and risk propagation from known-bad actors — an ensemble
-> of built-in graph algorithms running over one live snapshot, in one embedded
-> process, while transactions keep arriving. This is the workload a stitched-together
-> OLTP + Kafka + graph-DB + OLAP stack cannot serve consistently.
+> ### 🚩 Flagship examples — real-time risk, reacting as data arrives
+> Two **complete systems** ship in [`examples/`](examples/), each generating its
+> own synthetic data and reacting to every committed row through a built-in
+> **change stream** + **materialized worker** — one embedded process, one live
+> snapshot, no OLTP + Kafka + graph-DB + OLAP stack to stitch together:
+>
+> - **Anti-Money-Laundering** — structuring, layering (laundering cycles), mule
+>   fan-out, and risk propagation from known-bad actors, over a live payment graph.
+> - **Counterparty Credit & Market Risk** — real-time exposure & single-name
+>   limits, portfolio VaR, systemic importance (PageRank), and **default-cascade
+>   contagion** via a built-in Eisenberg–Noe clearing solver.
+>
 > ```bash
-> cargo run --release --example aml_realtime --no-default-features   # Rust
-> python examples/aml_app.py                                          # Python
+> cargo run --release --example aml_pipeline --no-default-features   # AML (streaming)
+> cargo run --release --example ccr_pipeline --no-default-features   # Risk (streaming)
+> python examples/aml_stream.py   ;   python examples/ccr_stream.py   # Python mirrors
 > ```
-> Full walkthrough: the [Real-Time AML case study](docs/book/src/case-studies/aml.md).
+> Each sustains **150–170 million events/hour single-node**, detection running
+> concurrently with ingest. Walkthroughs: the
+> [AML](docs/book/src/case-studies/aml.md) and
+> [CCR](docs/book/src/case-studies/ccr.md) case studies.
 
 > **Status: working HTAP engine.** Arrow-native storage with arbitrary schemas,
 > a dual-execution SQL layer (interpreter + DataFusion) behind a cost-based
@@ -202,9 +211,10 @@ Built into the core, available from both languages: `bfs`, `shortest_path`,
 `personalized_pagerank`, `degree`/`closeness`/`betweenness_centrality`,
 `connected_components`, `strongly_connected_components`, `laundering_cycles`,
 `label_propagation`, `k_core`, `triangle_count`, `common_neighbors`,
-`jaccard_similarity`, and more. The [Real-Time AML example](examples/) composes
-them into a working fraud-detection system — see the
-[case study](docs/book/src/case-studies/aml.md).
+`jaccard_similarity`, `eisenberg_noe` (systemic-risk clearing / default cascade),
+and more. The [AML](docs/book/src/case-studies/aml.md) and
+[CCR](docs/book/src/case-studies/ccr.md) examples compose them into working
+real-time fraud-detection and risk systems.
 
 ---
 

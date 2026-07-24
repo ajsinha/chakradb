@@ -3919,6 +3919,8 @@ Algorithms
 \texttt{strongly\_connected\_components}, \texttt{laundering\_cycles},
 \texttt{label\_propagation}, \texttt{k\_core},
 \texttt{triangle\_count} \\
+\textbf{Systemic risk} & \texttt{eisenberg\_noe} (clearing vector /
+default cascade) \\
 \textbf{Similarity} & \texttt{common\_neighbors},
 \texttt{jaccard\_similarity} \\
 \textbf{Degrees} & \texttt{in\_degree}, \texttt{out\_degree},
@@ -4753,6 +4755,282 @@ same logic through \texttt{conn.graph(...)}, showing that the
 is available to a client in a few hundred lines. \textbf{Follow the
 money --- in real time, over one consistent view of it.}
 
+\chapter{Case Study: Real-Time Counterparty Credit \& Market
+Risk}\label{case-study-real-time-counterparty-credit-market-risk}
+
+\epigraph{The revolutionary idea that defines the boundary between modern times and the past is the mastery of risk.}{--- Peter L. Bernstein, \emph{Against the Gods}}
+
+Banks still compute much of their risk \textbf{overnight}, in batch: the
+book is frozen, market data is snapshotted, and a grid churns until
+morning. By the time the numbers land, the market has moved. The prize
+everyone chases is \textbf{intraday, real-time risk} --- exposure,
+limits, VaR, and systemic contagion recomputed as prices tick and trades
+book. That is precisely the shape of workload ChakraDB is built for, and
+this chapter builds it end to end.
+
+It is the risk analogue of the \href{aml.md}{AML case study}: a live
+portfolio and a streaming market-data feed drive a \textbf{materialized
+worker} that reacts to every price tick through the change stream, over
+one consistent dataset, never blocking ingest. The runnable code is
+\texttt{examples/ccr\_pipeline.rs} (Rust) and
+\texttt{examples/ccr\_stream.py} (Python).
+
+\section{Two risk domains, one
+engine}\label{two-risk-domains-one-engine}
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Domain
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Question
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Cadence
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\textbf{Market risk} & How much could the book lose from price moves?
+(MtM, VaR) & per tick + periodic \\
+\textbf{Counterparty credit risk (CCR)} & If a counterparty defaults,
+what do we lose --- and who else falls? & per trade + periodic \\
+\end{longtable}
+
+Both are functions of the \emph{same} live data --- the trades, the
+prices, and the web of who owes whom. Stitching them across an OLTP
+store, a market-data bus, a graph database, and an overnight risk grid
+is the status quo; doing them together, in one embedded engine, on one
+consistent snapshot, is the ChakraDB thesis.
+
+\section{The exposure network is a
+graph}\label{the-exposure-network-is-a-graph}
+
+CCR is intrinsically a \textbf{network} problem, and this is where the
+built-in graph engine becomes the risk engine. Model the interbank
+system as a directed, weighted graph: a node is a legal entity; an edge
+\texttt{i\ →\ j} of weight \texttt{w} means \emph{\texttt{i} owes
+\texttt{j} the amount \texttt{w}}. On that one structure:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Risk question
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Built-in primitive
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Who is systemically important (too-connected-to-fail)? &
+\texttt{pagerank} on the liability network \\
+If X defaults, who is dragged under, and by how much? &
+\textbf{\texttt{eisenberg\_noe}} (clearing vector / default cascade) \\
+Hidden circular exposures = netting opportunities &
+\texttt{laundering\_cycles} (SCCs) \\
+Netting sets / collateral pools & \texttt{connected\_components} \\
+Concentration / Cover-2 & top-k weighted degree \\
+\end{longtable}
+
+\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-33.pdf}\end{center}
+
+\section{The schema}\label{the-schema-1}
+
+Trades and market data are ordinary tables; the exposure network is a
+graph over the same database.
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ counterparties (}\KeywordTok{id} \DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, name }\DataTypeTok{VARCHAR}\NormalTok{(}\DecValTok{32}\NormalTok{),}
+\NormalTok{    rating }\DataTypeTok{VARCHAR}\NormalTok{(}\DecValTok{4}\NormalTok{), external\_assets }\DataTypeTok{DECIMAL}\NormalTok{(}\DecValTok{18}\NormalTok{,}\DecValTok{2}\NormalTok{));}
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ trades (trade\_id }\DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, counterparty }\DataTypeTok{INTEGER}\NormalTok{,}
+\NormalTok{    instrument }\DataTypeTok{INTEGER}\NormalTok{, notional }\DataTypeTok{DECIMAL}\NormalTok{(}\DecValTok{18}\NormalTok{,}\DecValTok{2}\NormalTok{), trade\_price }\DataTypeTok{DECIMAL}\NormalTok{(}\DecValTok{12}\NormalTok{,}\DecValTok{4}\NormalTok{));}
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ market\_data (tick\_id }\DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, instrument }\DataTypeTok{INTEGER}\NormalTok{,}
+\NormalTok{    price }\DataTypeTok{DECIMAL}\NormalTok{(}\DecValTok{12}\NormalTok{,}\DecValTok{4}\NormalTok{), ts }\DataTypeTok{TIMESTAMP}\NormalTok{);              }\CommentTok{{-}{-} the streaming feed}
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ limits (counterparty }\DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, limit\_amount }\DataTypeTok{DECIMAL}\NormalTok{(}\DecValTok{18}\NormalTok{,}\DecValTok{2}\NormalTok{));}
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ interbank (}\KeywordTok{id} \DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, debtor }\DataTypeTok{INTEGER}\NormalTok{, creditor }\DataTypeTok{INTEGER}\NormalTok{,}
+\NormalTok{    amount }\DataTypeTok{DECIMAL}\NormalTok{(}\DecValTok{18}\NormalTok{,}\DecValTok{2}\NormalTok{));                            }\CommentTok{{-}{-} edges of the exposure graph}
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ risk\_alerts (}\KeywordTok{id} \DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, entity }\DataTypeTok{INTEGER}\NormalTok{, kind }\DataTypeTok{VARCHAR}\NormalTok{(}\DecValTok{40}\NormalTok{));}
+\end{Highlighting}
+\end{Shaded}
+
+Money is exact \texttt{DECIMAL}, never binary float --- a hard
+requirement when the number is a P\&L or an exposure
+(\href{../algorithms/decimal.md}{Exact Decimal Arithmetic}).
+
+\section{Real-time exposure: the per-tick
+calculation}\label{real-time-exposure-the-per-tick-calculation}
+
+\textbf{Current exposure} to a counterparty is the netted, non-negative
+mark-to-market of the trades facing it:
+\texttt{CE\_c\ =\ max(Σ\_\{t∈c\}\ MtM\_t,\ 0)}. For a linear instrument
+\texttt{MtM\_t\ =\ notional\_t\ ·\ (price\ −\ trade\_price\_t)}. The
+naïve approach reprices the whole book on every tick; the scalable
+approach reprices \textbf{only the trades on the instrument that
+ticked}, and folds the delta into a running per-counterparty exposure
+--- O(trades-on-that-instrument), not O(book).
+
+\begin{quote}
+\textbf{ALGORITHM --- T0: on each committed price tick
+\texttt{(instrument\ I,\ price\ p)}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{1  Δ ← p − last\_price[I]}
+\NormalTok{2  pnl\_window.push( Δ · Σ\_\{t on I\} notional\_t )        ▷ portfolio P\&L for VaR}
+\NormalTok{3  for each trade t on I:}
+\NormalTok{4      mtm′ ← notional\_t · (p − trade\_price\_t)}
+\NormalTok{5      exposure[t.cp] += mtm′ − mtm[t];  mtm[t] ← mtm′  ▷ incremental netting}
+\NormalTok{6  for each affected counterparty c:}
+\NormalTok{7      if max(exposure[c], 0) \textgreater{} limit[c]:  alert(c, LIMIT\_BREACH)}
+\NormalTok{8  last\_price[I] ← p}
+\end{Highlighting}
+\end{Shaded}
+\end{quote}
+
+This runs on every committed tick, at ingest speed --- the change stream
+delivers the tick the instant it commits.
+
+\section{Portfolio \& systemic risk: the periodic
+pass}\label{portfolio-systemic-risk-the-periodic-pass}
+
+The heavy analytics run on a cadence over a consistent
+\texttt{Graph::view()} snapshot, off the write path.
+
+\textbf{Value-at-Risk.} A 99\% one-tick VaR by historical simulation:
+the worst 1\% loss in the rolling P\&L window. A breach of the VaR limit
+raises a portfolio alert.
+
+\textbf{Systemic importance.} \texttt{pagerank} over the liability
+network. Because edges run debtor → creditor, PageRank mass accumulates
+at the entities everyone owes --- the hubs whose failure would ripple
+furthest.
+
+\textbf{Default contagion --- the Eisenberg--Noe clearing vector.} The
+centerpiece. Given external assets \texttt{e\_i} (each entity's outside
+cash) and the liability edges, the clearing payment vector \texttt{p}
+solves
+
+\[
+  p_i = \min\!\Big( \bar p_i,\; e_i + \sum_j \Pi_{ji}\, p_j \Big),
+  \qquad \bar p_i = \sum_j L_{ij},\quad \Pi_{ji} = L_{ji}/\bar p_j .
+\]
+
+Each node pays the smaller of what it owes and what it actually has once
+upstream payments arrive. ChakraDB solves it by the monotone Picard
+iteration from \texttt{p\ =\ p̄} downward --- which converges to the
+greatest clearing vector --- and reports each entity's payment,
+surviving equity, and, crucially, the set of \textbf{defaulters}:
+exactly who a cascade sinks. Feed it a stressed
+\texttt{external\_assets} (one entity's cash set to zero) and it
+simulates the shock's contagion.
+
+\begin{quote}
+\textbf{ALGORITHM --- T2: periodic systemic pass over one snapshot}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{1  view ← exposures.view()}
+\NormalTok{2  if VaR₉₉(pnl\_window) \textgreater{} var\_limit:  alert(PORTFOLIO, VAR\_BREACH)}
+\NormalTok{3  hub ← argmax view.pagerank();       alert(hub, SYSTEMICALLY\_IMPORTANT)}
+\NormalTok{4  for d in view.eisenberg\_noe(external\_assets).defaulted:}
+\NormalTok{5      alert(d, DEFAULT\_CASCADE)}
+\NormalTok{6  for ring in view.laundering\_cycles():}
+\NormalTok{7      for m in ring: alert(m, CIRCULAR\_EXPOSURE)}
+\end{Highlighting}
+\end{Shaded}
+\end{quote}
+
+\section{The worker is a materialized
+worker}\label{the-worker-is-a-materialized-worker}
+
+The whole risk engine is one
+\href{../architecture/overview.md}{materialized worker} --- a named,
+incrementally-maintained derivation of the data. In Rust it implements
+\texttt{MaterializedWorker} and is registered on the change stream:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{let}\NormalTok{ ccr }\OperatorTok{=}\NormalTok{ cdc}\OperatorTok{.}\NormalTok{materialize(}\ConstantTok{Some}\NormalTok{(}\StringTok{"market\_data"}\NormalTok{)}\OperatorTok{,} \PreprocessorTok{RiskWorker::}\NormalTok{new(engine}\OperatorTok{,}\NormalTok{ exposures}\OperatorTok{,}\NormalTok{ trades}\OperatorTok{,}\NormalTok{ assets))}\OperatorTok{;}
+\CommentTok{// ... the feed streams; the worker maintains exposure and fires alerts ...}
+\NormalTok{ccr}\OperatorTok{.}\NormalTok{query(}\OperatorTok{|}\NormalTok{w}\OperatorTok{|}\NormalTok{ w}\OperatorTok{.}\NormalTok{cp\_exposure}\OperatorTok{.}\NormalTok{clone())}\OperatorTok{;}   \CommentTok{// real{-}time exposure, any time}
+\NormalTok{ccr}\OperatorTok{.}\NormalTok{stop()}\OperatorTok{;}                             \CommentTok{// client owns the lifecycle}
+\end{Highlighting}
+\end{Shaded}
+
+In Python it is a class plus \texttt{conn.on\_change} --- the same
+design, the full engine (SQL, exact money, the graph algorithms,
+\texttt{eisenberg\_noe}) in a few hundred lines:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{def}\NormalTok{ react(old, new):}
+\NormalTok{    worker.on\_change(old, new)          }\CommentTok{\# dict: \{"instrument":…, "price":…\}}
+\NormalTok{conn.on\_change(}\StringTok{"market\_data"}\NormalTok{, react)}
+\end{Highlighting}
+\end{Shaded}
+
+\section{Capacity}\label{capacity}
+
+The shipped pipeline (\texttt{examples/ccr\_pipeline.rs}) runs the feed
+and the reacting risk worker concurrently over one engine:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{Ingest: 40,000 market{-}data ticks in 0.84s}
+\NormalTok{        = 47,790 ticks/s  ≈  172 million/hour}
+\NormalTok{All injected risks detected live — CCR pipeline verified.}
+\end{Highlighting}
+\end{Shaded}
+
+Real-time exposure, single-name limits, VaR, systemic-importance,
+default-cascade contagion, and circular-exposure detection --- all live,
+over one consistent dataset, while the feed keeps ticking. The periodic
+Eisenberg--Noe and PageRank passes run on an MVCC snapshot, so they
+never stall ingest. That non-blocking split is the difference between
+real-time risk and an overnight batch.
+
+\section{What ChakraDB made
+possible}\label{what-chakradb-made-possible-1}
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Risk measure
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+ChakraDB primitive
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Real-time current exposure \& netting & incremental per-tick repricing
+(T0) \\
+Single-name limit monitoring & live exposure vs \texttt{limits} \\
+Portfolio VaR / Expected Shortfall & historical simulation over the P\&L
+window \\
+Systemic importance & \texttt{pagerank} on the exposure network \\
+Default-cascade contagion & \textbf{\texttt{eisenberg\_noe}} clearing
+vector \\
+Circular exposures / netting & \texttt{laundering\_cycles} (SCC) \\
+Netting sets & \texttt{connected\_components} \\
+\end{longtable}
+
+The injected risks --- a concentrated single-name breach, a portfolio
+VaR breach, a systemic hub, a thinly-capitalised default cascade, and a
+ring of circular exposures --- are every one detected \textbf{live}, in
+one embedded process, while the market-data feed streams at 170 million
+ticks/hour. \textbf{Risk, in real time, over one consistent view of the
+book.}
+
 \chapter{Case Study: Real-Time Fraud Detection (HTAP +
 Graph)}\label{case-study-real-time-fraud-detection-htap-graph}
 
@@ -4776,9 +5054,9 @@ always a little stale.
 
 ChakraDB collapses them.
 
-\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-33.pdf}\end{center}
+\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-34.pdf}\end{center}
 
-\section{The schema}\label{the-schema-1}
+\section{The schema}\label{the-schema-2}
 
 \begin{Shaded}
 \begin{Highlighting}[]
@@ -4953,7 +5231,7 @@ snapshot reads}. This is the wedge: ChakraDB serves a workload DuckDB
 \emph{structurally cannot} --- a live write stream with analytics
 running over it at the same time.
 
-\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-34.pdf}\end{center}
+\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-35.pdf}\end{center}
 
 \textbf{Measured:} under 4 threads issuing durable, WAL-logged writes,
 ChakraDB's analytical query p50 degrades just \textbf{1.49×} (2.2 → 3.3
