@@ -355,7 +355,7 @@ Python. See [Graph Algorithms](../graph/algorithms.md) for the derivations.
 | **Centrality** | `pagerank`, `personalized_pagerank`, `degree_centrality`, `closeness_centrality`, `betweenness_centrality` |
 | **Community & structure** | `connected_components`, `strongly_connected_components`, `laundering_cycles`, `label_propagation`, `k_core`, `triangle_count` |
 | **Systemic risk** | `eisenberg_noe` (clearing vector / default cascade) |
-| **Similarity** | `common_neighbors`, `jaccard_similarity` |
+| **Similarity & link prediction** | `common_neighbors`, `jaccard_similarity`, `adamic_adar`, `recommend` |
 | **Degrees** | `in_degree`, `out_degree`, `in_neighbors`, `out_neighbors` |
 
 ## Snapshots are stable under writes

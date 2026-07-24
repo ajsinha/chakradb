@@ -18,16 +18,21 @@ run over a consistent live snapshot of them.
 > - **Counterparty Credit & Market Risk** — real-time exposure & single-name
 >   limits, portfolio VaR, systemic importance (PageRank), and **default-cascade
 >   contagion** via a built-in Eisenberg–Noe clearing solver.
+> - **Real-Time Recommendations** — collaborative filtering as a graph walk
+>   (`recommend`), "you might also like" (`adamic_adar`), and trending, updating
+>   live as interactions stream.
 >
 > ```bash
 > cargo run --release --example aml_pipeline --no-default-features   # AML (streaming)
 > cargo run --release --example ccr_pipeline --no-default-features   # Risk (streaming)
-> python examples/aml_stream.py   ;   python examples/ccr_stream.py   # Python mirrors
+> cargo run --release --example reco_pipeline --no-default-features  # Recommendations
+> python examples/aml_stream.py  ;  python examples/ccr_stream.py  ;  python examples/reco_stream.py
 > ```
-> Each sustains **150–170 million events/hour single-node**, detection running
+> Each sustains **150+ million events/hour single-node**, detection/serving running
 > concurrently with ingest. Walkthroughs: the
-> [AML](docs/book/src/case-studies/aml.md) and
-> [CCR](docs/book/src/case-studies/ccr.md) case studies.
+> [AML](docs/book/src/case-studies/aml.md),
+> [CCR](docs/book/src/case-studies/ccr.md), and
+> [Recommendations](docs/book/src/case-studies/reco.md) case studies.
 
 > **Status: working HTAP engine.** Arrow-native storage with arbitrary schemas,
 > a dual-execution SQL layer (interpreter + DataFusion) behind a cost-based
@@ -211,10 +216,12 @@ Built into the core, available from both languages: `bfs`, `shortest_path`,
 `personalized_pagerank`, `degree`/`closeness`/`betweenness_centrality`,
 `connected_components`, `strongly_connected_components`, `laundering_cycles`,
 `label_propagation`, `k_core`, `triangle_count`, `common_neighbors`,
-`jaccard_similarity`, `eisenberg_noe` (systemic-risk clearing / default cascade),
-and more. The [AML](docs/book/src/case-studies/aml.md) and
-[CCR](docs/book/src/case-studies/ccr.md) examples compose them into working
-real-time fraud-detection and risk systems.
+`jaccard_similarity`, `adamic_adar`, `recommend` (link prediction), `eisenberg_noe`
+(systemic-risk clearing / default cascade), and more. The
+[AML](docs/book/src/case-studies/aml.md),
+[CCR](docs/book/src/case-studies/ccr.md), and
+[Recommendations](docs/book/src/case-studies/reco.md) examples compose them into
+working real-time fraud-detection, risk, and personalization systems.
 
 ---
 

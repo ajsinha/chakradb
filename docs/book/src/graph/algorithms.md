@@ -137,17 +137,43 @@ The cheapest signals need no CSR at all:
   snapshot copy needed).
 - k-hop neighborhood — BFS truncated at depth k.
 
+## Systemic risk: the Eisenberg–Noe clearing vector
+
+Reading each directed edge `i → j` of weight `w` as a *liability* — `i` owes `j`
+the amount `w` — `eisenberg_noe(external_assets)` computes the clearing payment
+vector that models **default contagion**: who can pay, who defaults, and who a
+cascade drags under. It is the canonical systemic-risk model, solved by a monotone
+Picard iteration to the greatest clearing vector, and it powers the
+[Counterparty Risk case study](../case-studies/ccr.md). Full derivation there.
+
+## Link prediction & recommendations
+
+Two primitives turn the graph into a recommender ([Recommendations case
+study](../case-studies/reco.md)):
+
+- **`adamic_adar(a, b)`** — a link-prediction score summing `1/ln deg(z)` over
+  shared neighbours `z`: rare, niche connections count for more than popular ones.
+  On a user↔item graph it is "you might also like."
+- **`recommend(seed, k)`** — personalized PageRank seeded at `seed`, with the
+  seed's existing neighbours and zero-signal candidates removed, returning the
+  top-`k` remainder. Collaborative filtering as a random-walk-with-restart, in one
+  call.
+
 ## The algorithm menu
 
-| Algorithm | Use | Complexity | Representation |
-|---|---|---|---|
-| BFS / shortest path | reachability, hops | `O(V+E)` | CSR |
-| PageRank | influence, ranking | `O(iters·E)` | CSR |
-| Connected components | clustering, islands | `O(E·α(V))` | union-find |
-| Triangle counting | density, communities | `O(E^{1.5})` | sorted adjacency |
-| Out-degree / neighbors | centrality, expansion | `O(d)` | range scan |
+Every algorithm below is built into the core (`src/graph.rs`) and available from
+Rust and Python, over a consistent [`GraphView`](snapshot.md) snapshot.
 
-Deliberately **not** in v1 (expensive or hard — offered later or via export): exact
-betweenness centrality (all-pairs), Louvain modularity, exact diameter, general
-subgraph isomorphism. See the [design exploration](../../graph-exploration.md) for
-the roadmap.
+| Family | Algorithms |
+|---|---|
+| **Traversal & paths** | `bfs`, `shortest_path`, `dijkstra`, `weighted_shortest_path`, `topological_order` |
+| **Centrality** | `pagerank`, `personalized_pagerank`, `degree_centrality`, `closeness_centrality`, `betweenness_centrality` (Brandes) |
+| **Community & structure** | `connected_components` (WCC), `strongly_connected_components` / `laundering_cycles`, `label_propagation`, `k_core`, `triangle_count` |
+| **Similarity & link prediction** | `common_neighbors`, `jaccard_similarity`, `adamic_adar`, `recommend` |
+| **Systemic risk** | `eisenberg_noe` (clearing vector / default cascade) |
+| **Degrees** | `in_degree`, `out_degree`, `in_neighbors`, `out_neighbors` |
+
+Deliberately **not** yet in core (expensive or specialized — candidates for a
+later release): Louvain/Leiden modularity, exact diameter, general subgraph
+isomorphism, Johnson's all-simple-cycles, temporal motifs, and max-flow/min-cut.
+See the [design exploration](../../graph-exploration.md) for the roadmap.

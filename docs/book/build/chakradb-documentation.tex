@@ -3243,40 +3243,82 @@ The cheapest signals need no CSR at all:
   k-hop neighborhood --- BFS truncated at depth k.
 \end{itemize}
 
+\section{Systemic risk: the Eisenberg--Noe clearing
+vector}\label{systemic-risk-the-eisenbergnoe-clearing-vector}
+
+Reading each directed edge \texttt{i\ →\ j} of weight \texttt{w} as a
+\emph{liability} --- \texttt{i} owes \texttt{j} the amount \texttt{w}
+--- \texttt{eisenberg\_noe(external\_assets)} computes the clearing
+payment vector that models \textbf{default contagion}: who can pay, who
+defaults, and who a cascade drags under. It is the canonical
+systemic-risk model, solved by a monotone Picard iteration to the
+greatest clearing vector, and it powers the
+\href{../case-studies/ccr.md}{Counterparty Risk case study}. Full
+derivation there.
+
+\section{Link prediction \&
+recommendations}\label{link-prediction-recommendations}
+
+Two primitives turn the graph into a recommender
+(\href{../case-studies/reco.md}{Recommendations case study}):
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{\texttt{adamic\_adar(a,\ b)}} --- a link-prediction score
+  summing \texttt{1/ln\ deg(z)} over shared neighbours \texttt{z}: rare,
+  niche connections count for more than popular ones. On a user↔item
+  graph it is ``you might also like.''
+\item
+  \textbf{\texttt{recommend(seed,\ k)}} --- personalized PageRank seeded
+  at \texttt{seed}, with the seed's existing neighbours and zero-signal
+  candidates removed, returning the top-\texttt{k} remainder.
+  Collaborative filtering as a random-walk-with-restart, in one call.
+\end{itemize}
+
 \section{The algorithm menu}\label{the-algorithm-menu}
 
+Every algorithm below is built into the core (\texttt{src/graph.rs}) and
+available from Rust and Python, over a consistent
+\href{snapshot.md}{\texttt{GraphView}} snapshot.
+
 \begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}@{}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
 \toprule\noalign{}
 \begin{minipage}[b]{\linewidth}\raggedright
-Algorithm
+Family
 \end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Use
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Complexity
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Representation
+Algorithms
 \end{minipage} \\
 \midrule\noalign{}
 \endhead
 \bottomrule\noalign{}
 \endlastfoot
-BFS / shortest path & reachability, hops & \texttt{O(V+E)} & CSR \\
-PageRank & influence, ranking & \texttt{O(iters·E)} & CSR \\
-Connected components & clustering, islands & \texttt{O(E·α(V))} &
-union-find \\
-Triangle counting & density, communities & \texttt{O(E\^{}\{1.5\})} &
-sorted adjacency \\
-Out-degree / neighbors & centrality, expansion & \texttt{O(d)} & range
-scan \\
+\textbf{Traversal \& paths} & \texttt{bfs}, \texttt{shortest\_path},
+\texttt{dijkstra}, \texttt{weighted\_shortest\_path},
+\texttt{topological\_order} \\
+\textbf{Centrality} & \texttt{pagerank},
+\texttt{personalized\_pagerank}, \texttt{degree\_centrality},
+\texttt{closeness\_centrality}, \texttt{betweenness\_centrality}
+(Brandes) \\
+\textbf{Community \& structure} & \texttt{connected\_components} (WCC),
+\texttt{strongly\_connected\_components} / \texttt{laundering\_cycles},
+\texttt{label\_propagation}, \texttt{k\_core},
+\texttt{triangle\_count} \\
+\textbf{Similarity \& link prediction} & \texttt{common\_neighbors},
+\texttt{jaccard\_similarity}, \texttt{adamic\_adar},
+\texttt{recommend} \\
+\textbf{Systemic risk} & \texttt{eisenberg\_noe} (clearing vector /
+default cascade) \\
+\textbf{Degrees} & \texttt{in\_degree}, \texttt{out\_degree},
+\texttt{in\_neighbors}, \texttt{out\_neighbors} \\
 \end{longtable}
 
-Deliberately \textbf{not} in v1 (expensive or hard --- offered later or
-via export): exact betweenness centrality (all-pairs), Louvain
-modularity, exact diameter, general subgraph isomorphism. See the
+Deliberately \textbf{not} yet in core (expensive or specialized ---
+candidates for a later release): Louvain/Leiden modularity, exact
+diameter, general subgraph isomorphism, Johnson's all-simple-cycles,
+temporal motifs, and max-flow/min-cut. See the
 \href{../../graph-exploration.md}{design exploration} for the roadmap.
 
 \part{Reactive}
@@ -3998,8 +4040,9 @@ Algorithms
 \texttt{triangle\_count} \\
 \textbf{Systemic risk} & \texttt{eisenberg\_noe} (clearing vector /
 default cascade) \\
-\textbf{Similarity} & \texttt{common\_neighbors},
-\texttt{jaccard\_similarity} \\
+\textbf{Similarity \& link prediction} & \texttt{common\_neighbors},
+\texttt{jaccard\_similarity}, \texttt{adamic\_adar},
+\texttt{recommend} \\
 \textbf{Degrees} & \texttt{in\_degree}, \texttt{out\_degree},
 \texttt{in\_neighbors}, \texttt{out\_neighbors} \\
 \end{longtable}
@@ -4988,6 +5031,166 @@ one embedded process, while the market-data feed streams at 170 million
 ticks/hour. \textbf{Risk, in real time, over one consistent view of the
 book.}
 
+\chapter{Case Study: Real-Time
+Recommendations}\label{case-study-real-time-recommendations}
+
+\epigraph{People who liked this also liked \ldots}{--- every store, everywhere}
+
+The first two case studies catch \emph{bad} behaviour. This one is the
+opposite: it helps, and it shows ChakraDB's reach beyond fraud and risk.
+A stream of user interactions --- views, clicks, purchases --- drives a
+\textbf{live recommendation engine}: as engagement arrives, ``what
+should this user see next?'' is answered in real time, over one
+consistent graph, never blocking the ingest that feeds it.
+
+The workload usually needs a separate feature store, a nightly
+model-training job, and a serving tier reconciled by pipelines. Here it
+is one embedded process reacting to the interaction stream. The runnable
+code is \texttt{examples/reco\_pipeline.rs} (Rust) and
+\texttt{examples/reco\_stream.py} (Python).
+
+\section{Recommendation is link prediction on a bipartite
+graph}\label{recommendation-is-link-prediction-on-a-bipartite-graph}
+
+Model engagement as a bipartite graph: users on one side, items on the
+other, an edge for each interaction. ``What should user \emph{u} see?''
+becomes \emph{link prediction} --- which edges are likely to form next
+--- and ChakraDB has the primitives built in:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Question
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Built-in primitive
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+What should this user see next? & \texttt{recommend(user,\ k)} ---
+random-walk-with-restart \\
+You might also like \ldots{} & \texttt{adamic\_adar(a,\ b)} ---
+rarity-weighted item similarity \\
+What's trending? & \texttt{out\_degree} / \texttt{pagerank} \\
+Users like this one & \texttt{jaccard\_similarity},
+\texttt{common\_neighbors} \\
+\end{longtable}
+
+Edges are added \textbf{both ways} (\texttt{u\ →\ i} and
+\texttt{i\ →\ u}) so a random walk can bounce user → item → user → item,
+which is exactly collaborative filtering: the walk reaches items engaged
+by users similar to you.
+
+\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-35.pdf}\end{center}
+
+The target user engaged A and B; a cohort engaged A, B \textbf{and C};
+the walk from the target reaches C through the cohort --- so C is
+recommended.
+
+\section{The schema}\label{the-schema-2}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ interactions (}\KeywordTok{id} \DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, user\_id }\DataTypeTok{INTEGER}\NormalTok{,}
+\NormalTok{    item\_id }\DataTypeTok{INTEGER}\NormalTok{, kind }\DataTypeTok{VARCHAR}\NormalTok{(}\DecValTok{8}\NormalTok{), ts }\DataTypeTok{TIMESTAMP}\NormalTok{);   }\CommentTok{{-}{-} the engagement stream}
+\KeywordTok{CREATE} \KeywordTok{TABLE}\NormalTok{ recommendations (}\KeywordTok{id} \DataTypeTok{INTEGER} \KeywordTok{PRIMARY} \KeywordTok{KEY}\NormalTok{, user\_id }\DataTypeTok{INTEGER}\NormalTok{, item\_id }\DataTypeTok{INTEGER}\NormalTok{);}
+\end{Highlighting}
+\end{Shaded}
+
+The engagement \textbf{graph} is derived from the stream; item nodes
+live above the user-id range so the two never collide.
+
+\section{The recommender is a materialized
+worker}\label{the-recommender-is-a-materialized-worker}
+
+The engine is one \href{../reactive/change-streams.md}{materialized
+worker} over the interaction stream. Each interaction folds into the
+graph (T0); recommendations refresh periodically over a snapshot (T2).
+
+\begin{quote}
+\textbf{ALGORITHM --- T0: on each committed interaction
+\texttt{(user\ u,\ item\ i)}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{1  graph.add\_edge(u, item\_node(i));  graph.add\_edge(item\_node(i), u)   ▷ both ways}
+\end{Highlighting}
+\end{Shaded}
+\end{quote}
+
+\begin{quote}
+\textbf{ALGORITHM --- T2: refresh recommendations over one snapshot}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{1  view ← graph.view()}
+\NormalTok{2  recs    ← view.recommend(u, k)            ▷ items reached via similar users, unseen}
+\NormalTok{3  trending← items sorted by view.out\_degree ▷ most distinct users}
+\NormalTok{4  similar ← view.adamic\_adar(anchor, ·)     ▷ "you might also like"}
+\end{Highlighting}
+\end{Shaded}
+\end{quote}
+
+\texttt{recommend} runs personalized PageRank seeded at the user, drops
+the user's already-engaged items and any zero-signal candidate, and
+returns the top-\texttt{k} remainder --- collaborative filtering
+expressed as a graph walk, in one call.
+
+\section{In code}\label{in-code}
+
+Rust --- register the recommender on the interaction stream:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{let}\NormalTok{ engagement }\OperatorTok{=} \PreprocessorTok{Graph::}\NormalTok{open(db}\OperatorTok{.}\NormalTok{clone()}\OperatorTok{,} \StringTok{"engagement"}\NormalTok{)}\OperatorTok{?;}
+\KeywordTok{let}\NormalTok{ reco }\OperatorTok{=}\NormalTok{ cdc}\OperatorTok{.}\NormalTok{register(}\StringTok{"recommender"}\OperatorTok{,} \ConstantTok{Some}\NormalTok{(}\StringTok{"interactions"}\NormalTok{)}\OperatorTok{,}
+                        \PreprocessorTok{Recommender::}\NormalTok{new(engine}\OperatorTok{.}\NormalTok{clone()}\OperatorTok{,}\NormalTok{ engagement))}\OperatorTok{;}
+\CommentTok{// … the feed streams; recommendations refresh incrementally …}
+\NormalTok{reco}\OperatorTok{.}\NormalTok{query(}\OperatorTok{|}\NormalTok{w}\OperatorTok{|}\NormalTok{ w}\OperatorTok{.}\NormalTok{last\_recommendations}\OperatorTok{.}\NormalTok{clone())}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+Python --- the same worker as a class plus \texttt{conn.on\_change}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{view }\OperatorTok{=}\NormalTok{ graph.view()}
+\NormalTok{recs   }\OperatorTok{=}\NormalTok{ view.recommend(target\_user, }\DecValTok{10}\NormalTok{)      }\CommentTok{\# [(item\_node, score), …]}
+\NormalTok{trend  }\OperatorTok{=} \BuiltInTok{sorted}\NormalTok{(items, key}\OperatorTok{=}\NormalTok{view.out\_degree, reverse}\OperatorTok{=}\VariableTok{True}\NormalTok{)}
+\NormalTok{also   }\OperatorTok{=}\NormalTok{ view.adamic\_adar(item\_a, item\_b)}
+\end{Highlighting}
+\end{Shaded}
+
+\section{Capacity}\label{capacity-1}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{Ingest: 50,000 interactions in 1.1s}
+\NormalTok{        = 45,899 interactions/s  ≈  165 million/hour}
+\NormalTok{Recommendations verified — the cohort\textquotesingle{}s item surfaced live.}
+\end{Highlighting}
+\end{Shaded}
+
+Recommendations stay fresh as engagement streams, because the heavy walk
+runs on an MVCC snapshot off the write path. A cohort's co-engaged item
+is surfaced to the target user; the trending item ranks first by
+engagement; Adamic--Adar ranks the bundle items as most similar ---
+every check passing on the live stream.
+
+\section{The pattern, three times
+over}\label{the-pattern-three-times-over}
+
+This is the third system built on the same machinery --- the change
+stream, a materialized worker, and the graph library --- as
+\href{aml.md}{AML} and \href{ccr.md}{Counterparty Risk}. Catch
+laundering, measure systemic risk, or personalize a feed: the engine is
+the same, the workload reacts to live data in one process, and the
+reader never blocks the writer. That is what makes ChakraDB more than a
+query engine --- it is a substrate for real-time systems.
+
 \chapter{Case Study: Real-Time Fraud Detection (HTAP +
 Graph)}\label{case-study-real-time-fraud-detection-htap-graph}
 
@@ -5011,9 +5214,9 @@ always a little stale.
 
 ChakraDB collapses them.
 
-\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-35.pdf}\end{center}
+\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-36.pdf}\end{center}
 
-\section{The schema}\label{the-schema-2}
+\section{The schema}\label{the-schema-3}
 
 \begin{Shaded}
 \begin{Highlighting}[]
@@ -5161,7 +5364,7 @@ snapshot reads}. This is the wedge: ChakraDB serves a workload DuckDB
 \emph{structurally cannot} --- a live write stream with analytics
 running over it at the same time.
 
-\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-36.pdf}\end{center}
+\begin{center}\includegraphics[width=0.92\linewidth,height=0.80\textheight,keepaspectratio]{diagrams/diagram-37.pdf}\end{center}
 
 \textbf{Measured:} under 4 threads issuing durable, WAL-logged writes,
 ChakraDB's analytical query p50 degrades just \textbf{1.49×} (2.2 → 3.3

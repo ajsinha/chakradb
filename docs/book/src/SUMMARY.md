@@ -39,6 +39,7 @@
 
 - [Real-Time Anti-Money-Laundering](case-studies/aml.md)
 - [Real-Time Counterparty Credit & Market Risk](case-studies/ccr.md)
+- [Real-Time Recommendations](case-studies/reco.md)
 - [Real-Time Fraud Detection](case-studies/fraud.md)
 
 # Part VII — Perspective
