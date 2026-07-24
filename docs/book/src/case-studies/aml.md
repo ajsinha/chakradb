@@ -112,7 +112,7 @@ CREATE TABLE known_bad (
 The **flow graph** is derived: a node is an account, and a directed edge
 `src → dst` means "money moved from src to dst," weighted by amount. ChakraDB's
 `Graph` handle maintains it as an edges table keyed `(src, dst)` so adjacency is
-clustered ([The Graph Model](../graph/modeling.md)).
+clustered ([The Graph Model](../graph/model.md)).
 
 ## Ingestion
 
@@ -142,7 +142,7 @@ the log. Ingestion never pauses for the detector — the wedge.
 
 Each laundering typology maps onto a ChakraDB primitive. We take **one snapshot** —
 a SQL view of the current state and a `GraphView` (CSR) built from the same instant
-([Live Graph Analytics](../graph/live-analytics.md)) — so every detector sees a
+([Live Graph Analytics](../graph/snapshot.md)) — so every detector sees a
 consistent graph.
 
 ```rust
@@ -317,8 +317,8 @@ sequenceDiagram
   cadence over a `view()`; each pass is a fresh consistent snapshot while ingestion
   continues at full rate.
 - Watch `Storage::stats()` for checkpoint lag and backpressure under peak load
-  ([Observability](../guide/observability.md)); back up the store on a schedule
-  ([Backup & Restore](../guide/backup.md)).
+  ([Observability](../getting-started/getting-started.md)); back up the store on a schedule
+  ([Backup & Restore](../getting-started/getting-started.md)).
 
 ## Scaling to millions per hour — the event-driven pipeline
 

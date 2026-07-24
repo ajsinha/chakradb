@@ -66,7 +66,7 @@ try to out-scan it; the goal is to be *competitive* while adding concurrency. On
 
 The full harness (both engines, identical CSV) is `src/bin/clickbench.rs` +
 `scripts/clickbench_duckdb.sh`; the numbers and method are in
-[Benchmark Methodology](methodology.md).
+[Benchmark Methodology](comparisons.md).
 
 ## Feature and model comparison
 

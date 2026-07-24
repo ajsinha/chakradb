@@ -147,13 +147,13 @@ because when a trade-off arises, these are how it is resolved.
    multi-year problem; ChakraDB *buys* it (Apache DataFusion) and spends its own
    effort where the differentiation is — storage, MVCC, durability, the transactional
    interpreter, and the graph layer. (See [The Query
-   Layer](../architecture/query-router.md).)
+   Layer](../engine/query-router.md).)
 
 3. **Cold data pays nothing.** The cost of concurrency is borne only by
    recently-modified data. A part that predates every live snapshot is scanned with
    no per-row version check at all — so a billion-row table with a thousand recent
    mutations pays version costs on a thousand rows, not a billion. (See
-   [MVCC](../architecture/mvcc.md).)
+   [MVCC](../engine/mvcc.md).)
 
 4. **Immutability over invalidation.** Sealed parts are never edited in place;
    updates and deletes are new versions and deletion-vector marks. Immutable data is
@@ -213,6 +213,6 @@ ChakraDB is written in Rust; the core forbids `unsafe` code. Data is Apache **Ar
 end to end — in memory, on disk (Arrow IPC), and across the DataFusion boundary
 (zero-copy). Vectorized analytical execution is **bought** from Apache DataFusion;
 storage, MVCC, durability, the transactional interpreter, and the graph layer are
-**built**. The next part, [Architecture](../architecture/overview.md), shows how
+**built**. The next part, [Architecture](../engine/overview.md), shows how
 those pieces fit, and why the "buy execution, build storage" split is the whole
 strategy.

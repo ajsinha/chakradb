@@ -75,7 +75,7 @@ CREATE TABLE risk_alerts (id INTEGER PRIMARY KEY, entity INTEGER, kind VARCHAR(4
 ```
 
 Money is exact `DECIMAL`, never binary float — a hard requirement when the number
-is a P&L or an exposure ([Exact Decimal Arithmetic](../algorithms/decimal.md)).
+is a P&L or an exposure ([Exact Decimal Arithmetic](../engine/data-types.md)).
 
 ## Real-time exposure: the per-tick calculation
 
@@ -144,7 +144,7 @@ cash set to zero) and it simulates the shock's contagion.
 
 ## The worker is a materialized worker
 
-The whole risk engine is one [materialized worker](../architecture/overview.md) —
+The whole risk engine is one [materialized worker](../engine/overview.md) —
 a named, incrementally-maintained derivation of the data. In Rust it implements
 `MaterializedWorker` and is registered on the change stream:
 

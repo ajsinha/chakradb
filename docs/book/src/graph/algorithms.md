@@ -5,7 +5,7 @@
 ```
 
 All of ChakraDB's graph algorithms run over a `GraphView` — the immutable
-[CSR snapshot](csr.md). Because the view is a consistent copy taken from one MVCC
+[CSR snapshot](snapshot.md). Because the view is a consistent copy taken from one MVCC
 snapshot, every algorithm below runs **concurrently with ingest**: writers keep
 adding edges while the algorithm computes over a stable graph. Each is a compact
 Rust kernel; this chapter gives the method, the pseudocode, and the complexity.
@@ -133,7 +133,7 @@ assert_eq!(view.triangle_count(), 1);
 The cheapest signals need no CSR at all:
 
 - `out_degree(node)` — the length of the node's neighbor range.
-- `out_neighbors(node)` — a single [pruned range scan](adjacency.md), live (no
+- `out_neighbors(node)` — a single [pruned range scan](model.md), live (no
   snapshot copy needed).
 - k-hop neighborhood — BFS truncated at depth k.
 

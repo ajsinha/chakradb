@@ -111,11 +111,11 @@ blocked by the scorer.
 - Run the **scorer** in-line (per transaction) using live adjacency
   (`out_neighbors`, `out_degree`) for cheap signals, and a periodic `view()` +
   `pagerank`/`connected_components` pass for the expensive ring analysis (see
-  [Live Graph Analytics](../graph/live-analytics.md)).
+  [Live Graph Analytics](../graph/snapshot.md)).
 - Watch `Storage::stats()` for checkpoint lag and backpressure under peak ingest
-  (see [Observability](../guide/observability.md)).
+  (see [Observability](../getting-started/getting-started.md)).
 - Back up the store with `backup_to` on a cadence (see
-  [Backup & Restore](../guide/backup.md)).
+  [Backup & Restore](../getting-started/getting-started.md)).
 
 ## The takeaway
 

@@ -76,7 +76,7 @@ absorbs writes at memory speed; when it fills it is sealed, sorted by key, into 
 immutable columnar **Arrow part**; parts accumulate and are periodically merged by
 compaction. Every part carries a small resident **index** — a Bloom filter, per
 -column min/max zonemaps, version stamps, and a deletion vector. See
-[The Storage Engine](storage-engine.md).
+[The Storage Engine](storage.md).
 
 **Durability.** A write-ahead log with group commit makes writes durable before
 they are acknowledged; a manifest records the catalog and the set of live parts;
@@ -92,7 +92,7 @@ holding in mind before the details:
 > **1. The sorted key column *is* the index.** Because a sealed part is written
 > sorted by its key, a row's ordinal position *is* its offset. There is no
 > separate key→location map to store or maintain — the index cost is ~1.25 bytes
-> per row and flat with table size. This is the [primary-key index](pk-index.md).
+> per row and flat with table size. This is the [primary-key index](storage.md).
 
 > **2. Cold data pays zero concurrency cost.** MVCC visibility is a pure function
 > of a snapshot number and a part's version stamps. A part that predates every
