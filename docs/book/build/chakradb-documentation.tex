@@ -1052,8 +1052,8 @@ applies explicit ingest \textbf{backpressure} (a throttle, then a stall)
 keyed on the part count, surfaced in
 \href{../getting-started/getting-started.md}{\texttt{Storage::stats()}}.
 This is the ``cost of fast writes is paid in compaction, and made
-visible'' commitment from the \href{../introduction/cost-model.md}{cost
-model}.
+visible'' commitment from the
+\href{../introduction/introduction.md}{cost model}.
 
 \begin{quote}
 \textbf{Proposition 6 (Merge preserves the visible database).} For any
@@ -1386,7 +1386,7 @@ reverse}\label{readers-do-not-block-writers-and-the-reverse}
 The one serialization point is \emph{per table}: two writers to the
 \emph{same} table take a short write lock for the L0 insert. Different
 tables write concurrently. (This is the deliberate trade in the
-\href{../introduction/cost-model.md}{cost model}.)
+\href{../introduction/introduction.md}{cost model}.)
 
 \section{Garbage collection needs a
 watermark}\label{garbage-collection-needs-a-watermark}
@@ -2870,7 +2870,7 @@ table declare \texttt{PRIMARY\ KEY\ (src,\ dst)} or a lexicographic
 \texttt{BYTES} key. That would make edges first-class, remove the
 encoding entirely, and benefit non-graph multi-column keys too. It is
 the highest-leverage item on the graph roadmap (see the
-\href{../../graph-exploration.md}{design exploration}).
+\href{../../../graph-exploration.md}{design exploration}).
 
 \chapter{The CSR Snapshot}\label{the-csr-snapshot}
 
@@ -3154,9 +3154,10 @@ distribution. \textbf{Complexity \texttt{O(iterations\ ·\ E)}.}
 \end{Highlighting}
 \end{Shaded}
 
-\emph{Personalized PageRank} (recommendation, ``similar to X'') is the
-same iteration with the teleport vector concentrated on a seed set
-instead of uniform --- on the roadmap.
+\texttt{personalized\_pagerank} is the same iteration with the teleport
+vector concentrated on a \textbf{seed set} instead of uniform --- the
+engine behind risk propagation (AML/CCR) and the \texttt{recommend} walk
+(see below).
 
 \section{Connected components}\label{connected-components}
 
@@ -3177,8 +3178,11 @@ a \textbf{union-find} (disjoint-set) structure using path-halving.
 
 Union-find with path compression runs in near-linear
 \textbf{\texttt{O(E\ ·\ α(V))}} time, where \texttt{α} is the
-inverse-Ackermann function (effectively constant). Strongly-connected
-components (Tarjan) are a roadmap addition.
+inverse-Ackermann function (effectively constant).
+\textbf{Strongly}-connected components
+(\texttt{strongly\_connected\_components}, and
+\texttt{laundering\_cycles} for the non-trivial ones) find
+\emph{directed} cycles --- the core of AML round-trip detection.
 
 \begin{Shaded}
 \begin{Highlighting}[]
@@ -3311,7 +3315,8 @@ Deliberately \textbf{not} yet in core (expensive or specialized ---
 candidates for a later release): Louvain/Leiden modularity, exact
 diameter, general subgraph isomorphism, Johnson's all-simple-cycles,
 temporal motifs, and max-flow/min-cut. See the
-\href{../../graph-exploration.md}{design exploration} for the roadmap.
+\href{../../../graph-exploration.md}{design exploration} for the
+roadmap.
 
 \part{Reactive}
 

@@ -313,7 +313,7 @@ engine does **not** silently let scans degrade — it applies explicit ingest
 **backpressure** (a throttle, then a stall) keyed on the part count, surfaced in
 [`Storage::stats()`](../getting-started/getting-started.md). This is the "cost of fast writes
 is paid in compaction, and made visible" commitment from the
-[cost model](../introduction/cost-model.md).
+[cost model](../introduction/introduction.md).
 
 > **Proposition 6 (Merge preserves the visible database).** For any snapshot `S ≥
 > H`, the set of rows visible to `S` is identical before and after a merge with

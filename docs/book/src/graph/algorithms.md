@@ -76,8 +76,9 @@ probability mass; their rank is collected and redistributed uniformly through
 let pr = view.pagerank(30, 0.85);
 ```
 
-*Personalized PageRank* (recommendation, "similar to X") is the same iteration with
-the teleport vector concentrated on a seed set instead of uniform — on the roadmap.
+`personalized_pagerank` is the same iteration with the teleport vector
+concentrated on a **seed set** instead of uniform — the engine behind risk
+propagation (AML/CCR) and the `recommend` walk (see below).
 
 ## Connected components
 
@@ -95,8 +96,9 @@ connected_components():
 ```
 
 Union-find with path compression runs in near-linear **`O(E · α(V))`** time, where
-`α` is the inverse-Ackermann function (effectively constant). Strongly-connected
-components (Tarjan) are a roadmap addition.
+`α` is the inverse-Ackermann function (effectively constant). **Strongly**-connected
+components (`strongly_connected_components`, and `laundering_cycles` for the
+non-trivial ones) find *directed* cycles — the core of AML round-trip detection.
 
 ```rust
 let c = view.connected_components();
@@ -176,4 +178,4 @@ Rust and Python, over a consistent [`GraphView`](snapshot.md) snapshot.
 Deliberately **not** yet in core (expensive or specialized — candidates for a
 later release): Louvain/Leiden modularity, exact diameter, general subgraph
 isomorphism, Johnson's all-simple-cycles, temporal motifs, and max-flow/min-cut.
-See the [design exploration](../../graph-exploration.md) for the roadmap.
+See the [design exploration](../../../graph-exploration.md) for the roadmap.

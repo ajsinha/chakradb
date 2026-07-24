@@ -81,7 +81,7 @@ written.
 
 The one serialization point is *per table*: two writers to the *same* table take a
 short write lock for the L0 insert. Different tables write concurrently. (This is
-the deliberate trade in the [cost model](../introduction/cost-model.md).)
+the deliberate trade in the [cost model](../introduction/introduction.md).)
 
 ## Garbage collection needs a watermark
 

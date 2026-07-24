@@ -270,4 +270,4 @@ The packed-integer encoding caps node ids at `< 2³¹` (so keys stay positive
 bytes key** — letting a table declare `PRIMARY KEY (src, dst)` or a lexicographic
 `BYTES` key. That would make edges first-class, remove the encoding entirely, and
 benefit non-graph multi-column keys too. It is the highest-leverage item on the
-graph roadmap (see the [design exploration](../../graph-exploration.md)).
+graph roadmap (see the [design exploration](../../../graph-exploration.md)).

@@ -44,6 +44,17 @@ plan below is the original sequencing and gates.
 >
 > The milestone plan below remains a useful record of the *reasoning and gates*;
 > the ordering held, and the "buy execution, build storage" bet paid off.
+>
+> - **Beyond the original plan (shipped):** a **built-in graph engine** —
+>   clustered adjacency over the sorted key, CSR snapshots over one MVCC view, and
+>   20+ algorithms (paths, centralities, community, similarity/link-prediction,
+>   and the `eisenberg_noe` systemic-risk clearing solver), exposed to Rust and
+>   Python. And a **reactive layer**: a committed-change stream (CDC),
+>   `on_change` hooks, **materialized workers** with a registry (named,
+>   observable, resumable by CSN cursor), and pluggable sinks (in-process /
+>   JSON-lines / Kafka). Three end-to-end flagship applications — real-time AML,
+>   counterparty & market risk, and recommendations — are built on them
+>   (`examples/`, and the case-study chapters of the book).
 
 > **On estimates.** Durations assume **1–2 experienced Rust engineers working consistently**.
 > They are calibration, not commitments — and they are the least reliable content in this
